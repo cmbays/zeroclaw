@@ -558,6 +558,53 @@ impl Default for SecretsConfig {
 // ── Browser (friendly-service browsing only) ───────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrowserComputerUseConfig {
+    /// Sidecar endpoint for computer-use actions (OS-level mouse/keyboard/screenshot)
+    #[serde(default = "default_browser_computer_use_endpoint")]
+    pub endpoint: String,
+    /// Optional bearer token for computer-use sidecar
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// Per-action request timeout in milliseconds
+    #[serde(default = "default_browser_computer_use_timeout_ms")]
+    pub timeout_ms: u64,
+    /// Allow remote/public endpoint for computer-use sidecar (default: false)
+    #[serde(default)]
+    pub allow_remote_endpoint: bool,
+    /// Optional window title/process allowlist forwarded to sidecar policy
+    #[serde(default)]
+    pub window_allowlist: Vec<String>,
+    /// Optional X-axis boundary for coordinate-based actions
+    #[serde(default)]
+    pub max_coordinate_x: Option<i64>,
+    /// Optional Y-axis boundary for coordinate-based actions
+    #[serde(default)]
+    pub max_coordinate_y: Option<i64>,
+}
+
+fn default_browser_computer_use_endpoint() -> String {
+    "http://127.0.0.1:8787/v1/actions".into()
+}
+
+fn default_browser_computer_use_timeout_ms() -> u64 {
+    15_000
+}
+
+impl Default for BrowserComputerUseConfig {
+    fn default() -> Self {
+        Self {
+            endpoint: default_browser_computer_use_endpoint(),
+            api_key: None,
+            timeout_ms: default_browser_computer_use_timeout_ms(),
+            allow_remote_endpoint: false,
+            window_allowlist: Vec::new(),
+            max_coordinate_x: None,
+            max_coordinate_y: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BrowserConfig {
     /// Enable `browser_open` tool (opens URLs in Brave without scraping)
     #[serde(default)]
@@ -568,7 +615,7 @@ pub struct BrowserConfig {
     /// Browser session name (for agent-browser automation)
     #[serde(default)]
     pub session_name: Option<String>,
-    /// Browser automation backend: "agent_browser" | "rust_native" | "auto"
+    /// Browser automation backend: "agent_browser" | "rust_native" | "computer_use" | "auto"
     #[serde(default = "default_browser_backend")]
     pub backend: String,
     /// Headless mode for rust-native backend
@@ -580,6 +627,9 @@ pub struct BrowserConfig {
     /// Optional Chrome/Chromium executable path for rust-native backend
     #[serde(default)]
     pub native_chrome_path: Option<String>,
+    /// Computer-use sidecar configuration
+    #[serde(default)]
+    pub computer_use: BrowserComputerUseConfig,
 }
 
 fn default_browser_backend() -> String {
@@ -600,6 +650,7 @@ impl Default for BrowserConfig {
             native_headless: default_true(),
             native_webdriver_url: default_browser_webdriver_url(),
             native_chrome_path: None,
+            computer_use: BrowserComputerUseConfig::default(),
         }
     }
 }
@@ -634,7 +685,7 @@ fn default_http_timeout_secs() -> u64 {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryConfig {
-    /// "sqlite" | "markdown" | "none"
+    /// "sqlite" | "lucid" | "markdown" | "none" (`none` = explicit no-op memory)
     pub backend: String,
     /// Auto-save conversation context to memory
     pub auto_save: bool,
@@ -1286,7 +1337,7 @@ pub struct LarkConfig {
 // ── Security Config ─────────────────────────────────────────────────
 
 /// Security configuration for sandboxing, resource limits, and audit logging
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SecurityConfig {
     /// Sandbox configuration
     #[serde(default)]
@@ -1299,16 +1350,6 @@ pub struct SecurityConfig {
     /// Audit logging configuration
     #[serde(default)]
     pub audit: AuditConfig,
-}
-
-impl Default for SecurityConfig {
-    fn default() -> Self {
-        Self {
-            sandbox: SandboxConfig::default(),
-            resources: ResourceLimitsConfig::default(),
-            audit: AuditConfig::default(),
-        }
-    }
 }
 
 /// Sandbox configuration for OS-level isolation
@@ -1338,10 +1379,11 @@ impl Default for SandboxConfig {
 }
 
 /// Sandbox backend selection
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum SandboxBackend {
     /// Auto-detect best available (default)
+    #[default]
     Auto,
     /// Landlock (Linux kernel LSM, native)
     Landlock,
@@ -1353,12 +1395,6 @@ pub enum SandboxBackend {
     Docker,
     /// No sandboxing (application-layer only)
     None,
-}
-
-impl Default for SandboxBackend {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 /// Resource limits for command execution
@@ -1705,7 +1741,6 @@ fn sync_directory(_path: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use std::sync::{Mutex, OnceLock};
     use tempfile::TempDir;
 
     // ── Defaults ─────────────────────────────────────────────
@@ -2474,6 +2509,12 @@ default_temperature = 0.7
         assert!(b.native_headless);
         assert_eq!(b.native_webdriver_url, "http://127.0.0.1:9515");
         assert!(b.native_chrome_path.is_none());
+        assert_eq!(b.computer_use.endpoint, "http://127.0.0.1:8787/v1/actions");
+        assert_eq!(b.computer_use.timeout_ms, 15_000);
+        assert!(!b.computer_use.allow_remote_endpoint);
+        assert!(b.computer_use.window_allowlist.is_empty());
+        assert!(b.computer_use.max_coordinate_x.is_none());
+        assert!(b.computer_use.max_coordinate_y.is_none());
     }
 
     #[test]
@@ -2486,6 +2527,15 @@ default_temperature = 0.7
             native_headless: false,
             native_webdriver_url: "http://localhost:4444".into(),
             native_chrome_path: Some("/usr/bin/chromium".into()),
+            computer_use: BrowserComputerUseConfig {
+                endpoint: "https://computer-use.example.com/v1/actions".into(),
+                api_key: Some("test-token".into()),
+                timeout_ms: 8_000,
+                allow_remote_endpoint: true,
+                window_allowlist: vec!["Chrome".into(), "Visual Studio Code".into()],
+                max_coordinate_x: Some(3840),
+                max_coordinate_y: Some(2160),
+            },
         };
         let toml_str = toml::to_string(&b).unwrap();
         let parsed: BrowserConfig = toml::from_str(&toml_str).unwrap();
@@ -2499,6 +2549,16 @@ default_temperature = 0.7
             parsed.native_chrome_path.as_deref(),
             Some("/usr/bin/chromium")
         );
+        assert_eq!(
+            parsed.computer_use.endpoint,
+            "https://computer-use.example.com/v1/actions"
+        );
+        assert_eq!(parsed.computer_use.api_key.as_deref(), Some("test-token"));
+        assert_eq!(parsed.computer_use.timeout_ms, 8_000);
+        assert!(parsed.computer_use.allow_remote_endpoint);
+        assert_eq!(parsed.computer_use.window_allowlist.len(), 2);
+        assert_eq!(parsed.computer_use.max_coordinate_x, Some(3840));
+        assert_eq!(parsed.computer_use.max_coordinate_y, Some(2160));
     }
 
     #[test]
@@ -2513,19 +2573,18 @@ default_temperature = 0.7
         assert!(parsed.browser.allowed_domains.is_empty());
     }
 
-    fn env_override_lock() -> std::sync::MutexGuard<'static, ()> {
-        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        ENV_LOCK
-            .get_or_init(|| Mutex::new(()))
+    // ── Environment variable overrides (Docker support) ─────────
+
+    fn env_override_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        static ENV_OVERRIDE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        ENV_OVERRIDE_TEST_LOCK
             .lock()
             .expect("env override test lock poisoned")
     }
 
-    // ── Environment variable overrides (Docker support) ─────────
-
     #[test]
     fn env_override_api_key() {
-        let _guard = env_override_lock();
+        let _env_guard = env_override_test_guard();
         let mut config = Config::default();
         assert!(config.api_key.is_none());
 
@@ -2538,7 +2597,7 @@ default_temperature = 0.7
 
     #[test]
     fn env_override_api_key_fallback() {
-        let _guard = env_override_lock();
+        let _env_guard = env_override_test_guard();
         let mut config = Config::default();
 
         std::env::remove_var("ZEROCLAW_API_KEY");
@@ -2551,7 +2610,7 @@ default_temperature = 0.7
 
     #[test]
     fn env_override_provider() {
-        let _guard = env_override_lock();
+        let _env_guard = env_override_test_guard();
         let mut config = Config::default();
 
         std::env::set_var("ZEROCLAW_PROVIDER", "anthropic");
@@ -2563,7 +2622,7 @@ default_temperature = 0.7
 
     #[test]
     fn env_override_provider_fallback() {
-        let _guard = env_override_lock();
+        let _env_guard = env_override_test_guard();
         let mut config = Config::default();
 
         std::env::remove_var("ZEROCLAW_PROVIDER");
@@ -2576,7 +2635,7 @@ default_temperature = 0.7
 
     #[test]
     fn env_override_model() {
-        let _guard = env_override_lock();
+        let _env_guard = env_override_test_guard();
         let mut config = Config::default();
 
         std::env::set_var("ZEROCLAW_MODEL", "gpt-4o");
@@ -2588,7 +2647,7 @@ default_temperature = 0.7
 
     #[test]
     fn env_override_workspace() {
-        let _guard = env_override_lock();
+        let _env_guard = env_override_test_guard();
         let mut config = Config::default();
 
         std::env::set_var("ZEROCLAW_WORKSPACE", "/custom/workspace");
@@ -2600,7 +2659,7 @@ default_temperature = 0.7
 
     #[test]
     fn env_override_empty_values_ignored() {
-        let _guard = env_override_lock();
+        let _env_guard = env_override_test_guard();
         let mut config = Config::default();
         let original_provider = config.default_provider.clone();
 
@@ -2613,7 +2672,7 @@ default_temperature = 0.7
 
     #[test]
     fn env_override_gateway_port() {
-        let _guard = env_override_lock();
+        let _env_guard = env_override_test_guard();
         let mut config = Config::default();
         assert_eq!(config.gateway.port, 3000);
 
@@ -2626,7 +2685,7 @@ default_temperature = 0.7
 
     #[test]
     fn env_override_port_fallback() {
-        let _guard = env_override_lock();
+        let _env_guard = env_override_test_guard();
         let mut config = Config::default();
 
         std::env::remove_var("ZEROCLAW_GATEWAY_PORT");
@@ -2639,7 +2698,7 @@ default_temperature = 0.7
 
     #[test]
     fn env_override_gateway_host() {
-        let _guard = env_override_lock();
+        let _env_guard = env_override_test_guard();
         let mut config = Config::default();
         assert_eq!(config.gateway.host, "127.0.0.1");
 
@@ -2652,7 +2711,7 @@ default_temperature = 0.7
 
     #[test]
     fn env_override_host_fallback() {
-        let _guard = env_override_lock();
+        let _env_guard = env_override_test_guard();
         let mut config = Config::default();
 
         std::env::remove_var("ZEROCLAW_GATEWAY_HOST");
@@ -2665,7 +2724,7 @@ default_temperature = 0.7
 
     #[test]
     fn env_override_temperature() {
-        let _guard = env_override_lock();
+        let _env_guard = env_override_test_guard();
         let mut config = Config::default();
 
         std::env::set_var("ZEROCLAW_TEMPERATURE", "0.5");
@@ -2677,7 +2736,7 @@ default_temperature = 0.7
 
     #[test]
     fn env_override_temperature_out_of_range_ignored() {
-        let _guard = env_override_lock();
+        let _env_guard = env_override_test_guard();
         // Clean up any leftover env vars from other tests
         std::env::remove_var("ZEROCLAW_TEMPERATURE");
 
@@ -2697,7 +2756,7 @@ default_temperature = 0.7
 
     #[test]
     fn env_override_invalid_port_ignored() {
-        let _guard = env_override_lock();
+        let _env_guard = env_override_test_guard();
         let mut config = Config::default();
         let original_port = config.gateway.port;
 
