@@ -3771,7 +3771,7 @@ fn print_summary(config: &Config) {
     );
 
     // Secrets
-    println!("    {} Secrets:       {}", style("🔒").cyan(), "configured");
+    println!("    {} Secrets:       configured", style("🔒").cyan());
 
     // Gateway
     println!(
