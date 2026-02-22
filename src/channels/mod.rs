@@ -878,9 +878,11 @@ fn is_context_window_overflow_error(err: &anyhow::Error) -> bool {
 fn user_facing_llm_error(err: &anyhow::Error) -> String {
     let msg = err.to_string();
     if msg.contains("Is Ollama running") || msg.contains("ollama serve") {
-        "⚠️ I can't reach the reasoning engine right now. Is Ollama running? (`ollama serve`)".to_string()
+        "⚠️ I can't reach the reasoning engine right now. Is Ollama running? (`ollama serve`)"
+            .to_string()
     } else if msg.contains("not found, try pulling it first") || msg.contains("pull it first") {
-        "⚠️ The AI model isn't loaded yet. Pull it first (e.g., `ollama pull qwen3:14b`).".to_string()
+        "⚠️ The AI model isn't loaded yet. Pull it first (e.g., `ollama pull qwen3:14b`)."
+            .to_string()
     } else {
         format!("⚠️ Error: {}", providers::sanitize_api_error(&msg))
     }

@@ -200,6 +200,13 @@ pub struct Config {
     #[serde(default)]
     pub modes: HashMap<String, ModeConfig>,
 
+    /// Linear integration configuration (`[linear]`).
+    /// Defaults: `enabled=false`, `api_key=None`, `team_id=None`.
+    /// Compatibility: omitting the `[linear]` section is safe — defaults apply.
+    /// Rollback: remove or zero-out the `[linear]` section to disable the integration.
+    #[serde(default)]
+    pub linear: LinearConfig,
+
     /// Hooks configuration (lifecycle hooks and built-in hook toggles).
     #[serde(default)]
     pub hooks: HooksConfig,
@@ -287,6 +294,20 @@ pub struct ModeConfig {
     /// Allowlist of tool names for this mode (empty = all tools).
     #[serde(default)]
     pub tools: Vec<String>,
+}
+
+// ── Linear Config ────────────────────────────────────────────────
+
+/// Linear API integration configuration (`[linear]` section).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct LinearConfig {
+    /// Enable the Linear tool for the agent.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Linear API key (personal access token or OAuth token).
+    pub api_key: Option<String>,
+    /// Default team ID for issue operations.
+    pub team_id: Option<String>,
 }
 
 // ── Hardware Config (wizard-driven) ─────────────────────────────
@@ -3500,6 +3521,7 @@ impl Default for Config {
             peripherals: PeripheralsConfig::default(),
             agents: HashMap::new(),
             modes: HashMap::new(),
+            linear: LinearConfig::default(),
             hooks: HooksConfig::default(),
             hardware: HardwareConfig::default(),
             query_classification: QueryClassificationConfig::default(),
@@ -3896,6 +3918,8 @@ impl Config {
                 &mut config.web_search.brave_api_key,
                 "config.web_search.brave_api_key",
             )?;
+
+            decrypt_optional_secret(&store, &mut config.linear.api_key, "config.linear.api_key")?;
 
             decrypt_optional_secret(
                 &store,
@@ -4384,6 +4408,12 @@ impl Config {
 
         encrypt_optional_secret(
             &store,
+            &mut config_to_save.linear.api_key,
+            "config.linear.api_key",
+        )?;
+
+        encrypt_optional_secret(
+            &store,
             &mut config_to_save.storage.provider.config.db_url,
             "config.storage.provider.config.db_url",
         )?;
@@ -4773,6 +4803,7 @@ default_temperature = 0.7
             peripherals: PeripheralsConfig::default(),
             agents: HashMap::new(),
             modes: HashMap::new(),
+            linear: LinearConfig::default(),
             hooks: HooksConfig::default(),
             hardware: HardwareConfig::default(),
             transcription: TranscriptionConfig::default(),
@@ -4948,6 +4979,7 @@ tool_dispatcher = "xml"
             peripherals: PeripheralsConfig::default(),
             agents: HashMap::new(),
             modes: HashMap::new(),
+            linear: LinearConfig::default(),
             hooks: HooksConfig::default(),
             hardware: HardwareConfig::default(),
             transcription: TranscriptionConfig::default(),
@@ -4986,6 +5018,7 @@ tool_dispatcher = "xml"
         config.composio.api_key = Some("composio-credential".into());
         config.browser.computer_use.api_key = Some("browser-credential".into());
         config.web_search.brave_api_key = Some("brave-credential".into());
+        config.linear.api_key = Some("linear-credential".into());
         config.storage.provider.config.db_url = Some("postgres://user:pw@host/db".into());
 
         config.agents.insert(
@@ -5040,6 +5073,13 @@ tool_dispatcher = "xml"
         assert_eq!(
             store.decrypt(web_search_encrypted).unwrap(),
             "brave-credential"
+        );
+
+        let linear_encrypted = stored.linear.api_key.as_deref().unwrap();
+        assert!(crate::security::SecretStore::is_encrypted(linear_encrypted));
+        assert_eq!(
+            store.decrypt(linear_encrypted).unwrap(),
+            "linear-credential"
         );
 
         let worker = stored.agents.get("worker").unwrap();
