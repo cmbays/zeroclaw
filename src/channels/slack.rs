@@ -324,7 +324,7 @@ impl SlackChannel {
             .remove(thread_key)
             .map(|h| h.abort());
 
-        let wake_sleep = Arc::clone(&self.wake_sleep);
+        let wake_sleep: Arc<WakeSleepEngine> = Arc::clone(&self.wake_sleep);
         let thread_key_owned = thread_key.to_string();
         let bot_token = self.bot_token.clone();
         let http_client = self.http_client();
