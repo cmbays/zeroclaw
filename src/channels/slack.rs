@@ -364,6 +364,350 @@ impl SlackChannel {
             .insert(thread_key.to_string(), handle);
     }
 
+    // ── Interactive flow helpers ──────────────────────────────────────
+
+    /// Build Block Kit blocks for an issue draft message.
+    ///
+    /// Renders a summary section followed by Confirm / Edit / Cancel action buttons.
+    /// `title` is carried in each button's value so handlers can recover context.
+    pub fn build_issue_draft_blocks(title: &str, description: &str) -> serde_json::Value {
+        let summary = format!("*Draft Issue*\n*Title:* {title}\n*Description:* {description}");
+        serde_json::json!([
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": summary}
+            },
+            {
+                "type": "actions",
+                "block_id": "issue_actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "Confirm"},
+                        "action_id": "confirm_issue",
+                        "value": title,
+                        "style": "primary"
+                    },
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "Edit"},
+                        "action_id": "edit_issue",
+                        "value": title
+                    },
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "Cancel"},
+                        "action_id": "cancel_issue",
+                        "style": "danger"
+                    }
+                ]
+            }
+        ])
+    }
+
+    /// Build a Block Kit modal view for editing an issue draft.
+    ///
+    /// `private_metadata` carries `"<channel_id>:<thread_ts>"` so the view
+    /// submission handler can reconstruct the reply context.
+    fn build_issue_modal(initial_title: &str, private_metadata: &str) -> serde_json::Value {
+        serde_json::json!({
+            "type": "modal",
+            "callback_id": "edit_issue_modal",
+            "private_metadata": private_metadata,
+            "title": {"type": "plain_text", "text": "Edit Issue"},
+            "submit": {"type": "plain_text", "text": "Submit"},
+            "close": {"type": "plain_text", "text": "Cancel"},
+            "blocks": [
+                {
+                    "type": "input",
+                    "block_id": "title_block",
+                    "label": {"type": "plain_text", "text": "Title"},
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "title_input",
+                        "initial_value": initial_title
+                    }
+                },
+                {
+                    "type": "input",
+                    "block_id": "description_block",
+                    "label": {"type": "plain_text", "text": "Description"},
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "description_input",
+                        "multiline": true,
+                        "initial_value": ""
+                    }
+                }
+            ]
+        })
+    }
+
+    /// Build Block Kit blocks for an issue confirmation message.
+    ///
+    /// Renders a checkmark followed by a link to the created Linear issue.
+    pub fn build_issue_confirmation_blocks(title: &str, url: &str) -> serde_json::Value {
+        let text = format!(":white_check_mark: *Issue created:* <{url}|{title}>");
+        serde_json::json!([
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": text}
+            }
+        ])
+    }
+
+    /// Extract required context from a `block_actions` interactive payload.
+    ///
+    /// Returns `(user_id, channel_id, thread_ts, action_id, value, trigger_id)`,
+    /// or `None` if a required field is absent.
+    fn parse_block_action_context(
+        payload: &serde_json::Value,
+    ) -> Option<(String, String, Option<String>, String, String, String)> {
+        let user = payload
+            .get("user")
+            .and_then(|u| u.get("id"))
+            .and_then(|id| id.as_str())
+            .filter(|s| !s.is_empty())?
+            .to_string();
+
+        let channel = payload
+            .get("channel")
+            .and_then(|c| c.get("id"))
+            .and_then(|id| id.as_str())
+            .filter(|s| !s.is_empty())?
+            .to_string();
+
+        let thread_ts = payload
+            .get("message")
+            .and_then(|m| m.get("thread_ts").or_else(|| m.get("ts")))
+            .and_then(|ts| ts.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+
+        let action = payload
+            .get("actions")
+            .and_then(|a| a.as_array())
+            .and_then(|a| a.first())?;
+
+        let action_id = action
+            .get("action_id")
+            .and_then(|id| id.as_str())
+            .filter(|s| !s.is_empty())?
+            .to_string();
+
+        let value = action
+            .get("value")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let trigger_id = payload
+            .get("trigger_id")
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        Some((user, channel, thread_ts, action_id, value, trigger_id))
+    }
+
+    /// Handle a `block_actions` interactive payload.
+    ///
+    /// `edit_issue` actions open a modal via [`open_modal`]; all other actions
+    /// are forwarded as synthetic [`ChannelMessage`]s to the agent.
+    async fn handle_block_action(
+        &self,
+        payload: &serde_json::Value,
+        scoped_channel: Option<&str>,
+        tx: &tokio::sync::mpsc::Sender<ChannelMessage>,
+    ) -> anyhow::Result<()> {
+        let Some((user, channel, thread_ts, action_id, value, trigger_id)) =
+            Self::parse_block_action_context(payload)
+        else {
+            tracing::warn!("Slack: block_action payload missing required fields");
+            return Ok(());
+        };
+
+        if !self.is_user_allowed(&user) {
+            tracing::debug!("Slack: ignoring block_action from unauthorized user: {user}");
+            return Ok(());
+        }
+
+        if let Some(scoped) = scoped_channel {
+            if channel != scoped {
+                return Ok(());
+            }
+        }
+
+        if action_id == "edit_issue" {
+            if trigger_id.is_empty() {
+                tracing::warn!("Slack: edit_issue action missing trigger_id — cannot open modal");
+                return Ok(());
+            }
+            let meta = match &thread_ts {
+                Some(ts) => format!("{channel}:{ts}"),
+                None => channel.clone(),
+            };
+            if let Err(e) = self.open_modal(&trigger_id, &value, &meta).await {
+                tracing::warn!("Slack: views.open failed: {e}");
+            }
+            return Ok(());
+        }
+
+        let content = format!("[block_action:{action_id}] {value}");
+        let id_suffix = thread_ts.as_deref().unwrap_or(&channel).to_string();
+        let channel_msg = ChannelMessage {
+            id: format!("slack_action_{channel}_{id_suffix}"),
+            sender: user,
+            reply_target: channel.clone(),
+            content,
+            channel: "slack".to_string(),
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            thread_ts,
+        };
+
+        if tx.send(channel_msg).await.is_err() {
+            anyhow::bail!("Slack: message channel closed");
+        }
+
+        Ok(())
+    }
+
+    /// Open a Slack modal for issue editing.
+    ///
+    /// `private_metadata` is passed through to the modal and recovered on view
+    /// submission to identify the reply target channel and thread.
+    async fn open_modal(
+        &self,
+        trigger_id: &str,
+        initial_title: &str,
+        private_metadata: &str,
+    ) -> anyhow::Result<()> {
+        let view = Self::build_issue_modal(initial_title, private_metadata);
+        let body = serde_json::json!({"trigger_id": trigger_id, "view": view});
+
+        let resp = self
+            .http_client()
+            .post("https://slack.com/api/views.open")
+            .bearer_auth(&self.bot_token)
+            .json(&body)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        let body_text = resp
+            .text()
+            .await
+            .unwrap_or_else(|e| format!("<failed to read response body: {e}>"));
+
+        if !status.is_success() {
+            anyhow::bail!("Slack views.open failed ({status}): {body_text}");
+        }
+
+        let parsed: serde_json::Value = serde_json::from_str(&body_text).unwrap_or_default();
+        if parsed.get("ok") == Some(&serde_json::Value::Bool(false)) {
+            let err = parsed
+                .get("error")
+                .and_then(|e| e.as_str())
+                .unwrap_or("unknown");
+            anyhow::bail!("Slack views.open failed: {err}");
+        }
+
+        Ok(())
+    }
+
+    /// Handle a `view_submission` interactive payload.
+    ///
+    /// Extracts the modal form values and reply context from `private_metadata`,
+    /// then forwards a synthetic [`ChannelMessage`] to the agent.
+    async fn handle_view_submission(
+        &self,
+        payload: &serde_json::Value,
+        tx: &tokio::sync::mpsc::Sender<ChannelMessage>,
+    ) -> anyhow::Result<()> {
+        let user = payload
+            .get("user")
+            .and_then(|u| u.get("id"))
+            .and_then(|id| id.as_str())
+            .unwrap_or("");
+
+        if user.is_empty() || !self.is_user_allowed(user) {
+            tracing::debug!("Slack: ignoring view_submission from unauthorized user");
+            return Ok(());
+        }
+
+        let view = match payload.get("view") {
+            Some(v) => v,
+            None => {
+                tracing::warn!("Slack: view_submission missing view field");
+                return Ok(());
+            }
+        };
+
+        let callback_id = view
+            .get("callback_id")
+            .and_then(|id| id.as_str())
+            .unwrap_or("unknown");
+
+        // Decode channel and thread_ts from private_metadata ("channel_id:thread_ts")
+        let private_metadata = view
+            .get("private_metadata")
+            .and_then(|m| m.as_str())
+            .unwrap_or("");
+
+        let (channel, thread_ts) = if let Some((c, t)) = private_metadata.split_once(':') {
+            (c.to_string(), Some(t.to_string()))
+        } else {
+            (private_metadata.to_string(), None)
+        };
+
+        if channel.is_empty() {
+            tracing::warn!("Slack: view_submission missing channel in private_metadata");
+            return Ok(());
+        }
+
+        let state = view.get("state").and_then(|s| s.get("values"));
+
+        let title = state
+            .and_then(|s| s.get("title_block"))
+            .and_then(|b| b.get("title_input"))
+            .and_then(|i| i.get("value"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        let description = state
+            .and_then(|s| s.get("description_block"))
+            .and_then(|b| b.get("description_input"))
+            .and_then(|i| i.get("value"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        let content =
+            format!("[view_submission:{callback_id}] title={title} description={description}");
+
+        let id_suffix = thread_ts.as_deref().unwrap_or(&channel).to_string();
+        let channel_msg = ChannelMessage {
+            id: format!("slack_view_{channel}_{id_suffix}"),
+            sender: user.to_string(),
+            reply_target: channel.clone(),
+            content,
+            channel: "slack".to_string(),
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            thread_ts,
+        };
+
+        if tx.send(channel_msg).await.is_err() {
+            anyhow::bail!("Slack: message channel closed");
+        }
+
+        Ok(())
+    }
+
     /// Build the JSON body for `chat.postMessage` from a `SendMessage`.
     fn build_send_body(message: &SendMessage) -> serde_json::Value {
         let mut body = serde_json::json!({
@@ -565,7 +909,27 @@ impl SlackChannel {
                 self.reset_inactivity_timer(&thread_key, &channel, &timer_ts);
             }
             "interactive" => {
-                tracing::debug!("Slack: interactive event (stub for W5)");
+                let payload_type = envelope
+                    .payload
+                    .get("type")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("");
+                match payload_type {
+                    "block_actions" => {
+                        self.handle_block_action(
+                            &envelope.payload,
+                            scoped_channel.as_deref(),
+                            tx,
+                        )
+                        .await?;
+                    }
+                    "view_submission" => {
+                        self.handle_view_submission(&envelope.payload, tx).await?;
+                    }
+                    other => {
+                        tracing::debug!("Slack: unknown interactive payload type: {other}");
+                    }
+                }
             }
             "slash_commands" => {
                 tracing::debug!("Slack: slash command (ignored)");
@@ -1256,5 +1620,178 @@ mod tests {
         assert!(body.get("blocks").is_none());
         assert!(body.get("reply_broadcast").is_none());
         assert!(body.get("thread_ts").is_none());
+    }
+
+    // ── Interactive flow — Block Kit template builders ─────────────
+
+    #[test]
+    fn build_issue_draft_blocks_has_three_action_buttons() {
+        let blocks = SlackChannel::build_issue_draft_blocks("Fix auth bug", "Auth fails on mobile");
+        let elements = blocks[1]["elements"].as_array().unwrap();
+        assert_eq!(elements.len(), 3);
+    }
+
+    #[test]
+    fn build_issue_draft_blocks_action_ids_are_correct() {
+        let blocks = SlackChannel::build_issue_draft_blocks("Fix auth bug", "desc");
+        let elements = blocks[1]["elements"].as_array().unwrap();
+        assert_eq!(elements[0]["action_id"], "confirm_issue");
+        assert_eq!(elements[1]["action_id"], "edit_issue");
+        assert_eq!(elements[2]["action_id"], "cancel_issue");
+    }
+
+    #[test]
+    fn build_issue_draft_blocks_confirm_is_primary_cancel_is_danger() {
+        let blocks = SlackChannel::build_issue_draft_blocks("T", "D");
+        let elements = blocks[1]["elements"].as_array().unwrap();
+        assert_eq!(elements[0]["style"], "primary");
+        assert_eq!(elements[2]["style"], "danger");
+        // Edit button has no style override
+        assert!(elements[1].get("style").map_or(true, |v| v.is_null()));
+    }
+
+    #[test]
+    fn build_issue_draft_blocks_title_in_section_text() {
+        let blocks = SlackChannel::build_issue_draft_blocks("Auth Bug", "Fix mobile auth");
+        let section_text = blocks[0]["text"]["text"].as_str().unwrap();
+        assert!(section_text.contains("Auth Bug"));
+        assert!(section_text.contains("Fix mobile auth"));
+    }
+
+    #[test]
+    fn build_issue_draft_blocks_title_as_button_value() {
+        let blocks = SlackChannel::build_issue_draft_blocks("Auth Bug", "desc");
+        let elements = blocks[1]["elements"].as_array().unwrap();
+        // confirm and edit carry the title as value for handler context recovery
+        assert_eq!(elements[0]["value"], "Auth Bug");
+        assert_eq!(elements[1]["value"], "Auth Bug");
+    }
+
+    #[test]
+    fn build_issue_confirmation_blocks_contains_link() {
+        let blocks = SlackChannel::build_issue_confirmation_blocks(
+            "Auth Bug",
+            "https://linear.app/team/issue/TEAM-1",
+        );
+        let text = blocks[0]["text"]["text"].as_str().unwrap();
+        assert!(text.contains("https://linear.app/team/issue/TEAM-1"));
+        assert!(text.contains("Auth Bug"));
+    }
+
+    #[test]
+    fn build_issue_confirmation_blocks_is_mrkdwn_section() {
+        let blocks = SlackChannel::build_issue_confirmation_blocks("T", "https://example.com");
+        assert_eq!(blocks[0]["type"], "section");
+        assert_eq!(blocks[0]["text"]["type"], "mrkdwn");
+    }
+
+    #[test]
+    fn build_issue_modal_has_required_structure() {
+        let modal = SlackChannel::build_issue_modal("Fix auth", "C123:1234567890.000001");
+        assert_eq!(modal["type"], "modal");
+        assert_eq!(modal["callback_id"], "edit_issue_modal");
+        assert_eq!(modal["private_metadata"], "C123:1234567890.000001");
+        let blocks = modal["blocks"].as_array().unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0]["block_id"], "title_block");
+        assert_eq!(blocks[1]["block_id"], "description_block");
+    }
+
+    #[test]
+    fn build_issue_modal_prefills_title() {
+        let modal = SlackChannel::build_issue_modal("Prefill Title", "C123:ts");
+        let title_input = &modal["blocks"][0]["element"];
+        assert_eq!(title_input["initial_value"], "Prefill Title");
+    }
+
+    // ── Interactive flow — block_action payload parsing ───────────
+
+    #[test]
+    fn parse_block_action_context_extracts_all_fields() {
+        let payload = serde_json::json!({
+            "user": {"id": "U123"},
+            "channel": {"id": "C456"},
+            "message": {"ts": "1234567890.000001", "thread_ts": "1234567890.000000"},
+            "actions": [{"action_id": "confirm_issue", "value": "Fix auth bug"}],
+            "trigger_id": "TRG1"
+        });
+        let result = SlackChannel::parse_block_action_context(&payload);
+        assert!(result.is_some());
+        let (user, channel, thread_ts, action_id, value, trigger_id) = result.unwrap();
+        assert_eq!(user, "U123");
+        assert_eq!(channel, "C456");
+        assert_eq!(thread_ts.as_deref(), Some("1234567890.000000"));
+        assert_eq!(action_id, "confirm_issue");
+        assert_eq!(value, "Fix auth bug");
+        assert_eq!(trigger_id, "TRG1");
+    }
+
+    #[test]
+    fn parse_block_action_context_missing_user_returns_none() {
+        let payload = serde_json::json!({
+            "channel": {"id": "C456"},
+            "actions": [{"action_id": "confirm_issue", "value": "title"}],
+            "trigger_id": "TRG1"
+        });
+        assert!(SlackChannel::parse_block_action_context(&payload).is_none());
+    }
+
+    #[test]
+    fn parse_block_action_context_missing_channel_returns_none() {
+        let payload = serde_json::json!({
+            "user": {"id": "U123"},
+            "actions": [{"action_id": "confirm_issue", "value": "title"}],
+            "trigger_id": "TRG1"
+        });
+        assert!(SlackChannel::parse_block_action_context(&payload).is_none());
+    }
+
+    #[test]
+    fn parse_block_action_context_empty_actions_returns_none() {
+        let payload = serde_json::json!({
+            "user": {"id": "U123"},
+            "channel": {"id": "C456"},
+            "actions": [],
+            "trigger_id": "TRG1"
+        });
+        assert!(SlackChannel::parse_block_action_context(&payload).is_none());
+    }
+
+    #[test]
+    fn parse_block_action_context_thread_ts_falls_back_to_message_ts() {
+        let payload = serde_json::json!({
+            "user": {"id": "U123"},
+            "channel": {"id": "C456"},
+            "message": {"ts": "1234567890.000001"},
+            "actions": [{"action_id": "confirm_issue", "value": "title"}],
+            "trigger_id": "TRG1"
+        });
+        let (_, _, thread_ts, _, _, _) =
+            SlackChannel::parse_block_action_context(&payload).unwrap();
+        assert_eq!(thread_ts.as_deref(), Some("1234567890.000001"));
+    }
+
+    #[test]
+    fn parse_block_action_context_no_message_gives_none_thread_ts() {
+        let payload = serde_json::json!({
+            "user": {"id": "U123"},
+            "channel": {"id": "C456"},
+            "actions": [{"action_id": "confirm_issue", "value": "title"}],
+            "trigger_id": "TRG1"
+        });
+        let (_, _, thread_ts, _, _, _) =
+            SlackChannel::parse_block_action_context(&payload).unwrap();
+        assert!(thread_ts.is_none());
+    }
+
+    #[test]
+    fn parse_block_action_context_missing_action_id_returns_none() {
+        let payload = serde_json::json!({
+            "user": {"id": "U123"},
+            "channel": {"id": "C456"},
+            "actions": [{"value": "title"}],
+            "trigger_id": "TRG1"
+        });
+        assert!(SlackChannel::parse_block_action_context(&payload).is_none());
     }
 }
