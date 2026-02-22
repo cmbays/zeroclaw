@@ -1,9 +1,12 @@
 use super::traits::{Channel, ChannelMessage, SendMessage};
+use crate::wake_sleep::{EventDecision, WakeSleepEngine, INACTIVITY_TIMEOUT};
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio::task::AbortHandle;
 use tokio_tungstenite::tungstenite::Message as WsMsg;
 
 /// Socket Mode envelope received over the WebSocket connection.
@@ -21,6 +24,8 @@ pub struct SlackChannel {
     app_token: Option<String>,
     channel_id: Option<String>,
     allowed_users: Vec<String>,
+    wake_sleep: Arc<WakeSleepEngine>,
+    timers: Arc<Mutex<HashMap<String, AbortHandle>>>,
 }
 
 impl SlackChannel {
@@ -35,6 +40,8 @@ impl SlackChannel {
             app_token,
             channel_id,
             allowed_users,
+            wake_sleep: Arc::new(WakeSleepEngine::new()),
+            timers: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -292,9 +299,59 @@ impl SlackChannel {
         ))
     }
 
-    /// Stub for wake/sleep filtering — always processes. Real logic in W4B.
-    fn should_process_event(&self, _event: &serde_json::Value) -> bool {
-        true
+    /// Reset the inactivity timer for a thread.
+    ///
+    /// Aborts any existing timer for this thread then spawns a new one that
+    /// will call `mark_sleeping` and post a sleep notification after
+    /// [`INACTIVITY_TIMEOUT`].
+    fn reset_inactivity_timer(&self, thread_key: &str, channel: &str, thread_ts: &str) {
+        // Abort previous timer for this thread, if any.
+        if let Ok(mut timers) = self.timers.lock() {
+            if let Some(handle) = timers.remove(thread_key) {
+                handle.abort();
+            }
+        }
+
+        let wake_sleep = Arc::clone(&self.wake_sleep);
+        let timers = Arc::clone(&self.timers);
+        let thread_key_owned = thread_key.to_string();
+        let bot_token = self.bot_token.clone();
+        let channel_owned = channel.to_string();
+        let thread_ts_owned = thread_ts.to_string();
+
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(INACTIVITY_TIMEOUT).await;
+
+            wake_sleep.mark_sleeping(&thread_key_owned);
+            tracing::info!("Slack: thread {thread_key_owned} went to sleep (inactivity)");
+
+            // Remove our own handle from the map.
+            if let Ok(mut t) = timers.lock() {
+                t.remove(&thread_key_owned);
+            }
+
+            // Post sleep notification.
+            let client = reqwest::Client::new();
+            let body = serde_json::json!({
+                "channel": channel_owned,
+                "thread_ts": thread_ts_owned,
+                "text": "Going to sleep — @mention me to wake up :zzz:"
+            });
+            if let Err(e) = client
+                .post("https://slack.com/api/chat.postMessage")
+                .bearer_auth(&bot_token)
+                .json(&body)
+                .send()
+                .await
+            {
+                tracing::warn!("Slack: failed to post sleep notification: {e}");
+            }
+        })
+        .abort_handle();
+
+        if let Ok(mut timers) = self.timers.lock() {
+            timers.insert(thread_key.to_string(), handle);
+        }
     }
 
     /// Build the JSON body for `chat.postMessage` from a `SendMessage`.
@@ -434,10 +491,6 @@ impl SlackChannel {
     ) -> anyhow::Result<()> {
         match envelope.envelope_type.as_str() {
             "events_api" => {
-                if !self.should_process_event(&envelope.payload) {
-                    return Ok(());
-                }
-
                 let (user, text, channel, ts, thread_ts) =
                     match Self::extract_event_message(&envelope.payload, bot_user_id) {
                         Some(fields) => fields,
@@ -456,6 +509,31 @@ impl SlackChannel {
                     return Ok(());
                 }
 
+                // Wake/sleep filtering: @mentions wake sleeping threads; other
+                // messages in sleeping threads are discarded.
+                let event_type = envelope
+                    .payload
+                    .get("event")
+                    .and_then(|e| e.get("type"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("");
+                let is_mention = event_type == "app_mention";
+                let thread_key = format!("{}:{}", channel, thread_ts.as_deref().unwrap_or(&ts));
+
+                match self.wake_sleep.on_event(&thread_key, is_mention) {
+                    EventDecision::Forward => {}
+                    EventDecision::Wake => {
+                        tracing::info!("Slack: thread {thread_key} woke up");
+                    }
+                    EventDecision::Discard => {
+                        tracing::debug!("Slack: thread {thread_key} sleeping — discarding event");
+                        return Ok(());
+                    }
+                }
+
+                // Capture timer ts before thread_ts is moved into channel_msg.
+                let timer_ts = thread_ts.as_deref().unwrap_or(&ts).to_string();
+
                 let channel_msg = ChannelMessage {
                     id: format!("slack_{channel}_{ts}"),
                     sender: user,
@@ -472,6 +550,9 @@ impl SlackChannel {
                 if tx.send(channel_msg).await.is_err() {
                     anyhow::bail!("Slack: message channel closed");
                 }
+
+                // Reset per-thread inactivity timer.
+                self.reset_inactivity_timer(&thread_key, &channel, &timer_ts);
             }
             "interactive" => {
                 tracing::debug!("Slack: interactive event (stub for W5)");

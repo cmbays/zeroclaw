@@ -70,6 +70,7 @@ pub(crate) mod skills;
 pub mod tools;
 pub(crate) mod tunnel;
 pub(crate) mod util;
+pub(crate) mod wake_sleep;
 
 pub use config::Config;
 
