@@ -869,6 +869,23 @@ fn is_context_window_overflow_error(err: &anyhow::Error) -> bool {
     .any(|hint| lower.contains(hint))
 }
 
+/// Produce a user-facing error message for LLM failures.
+///
+/// Translates raw provider error strings into concise, actionable messages
+/// suitable for display in chat channels. Handles Ollama-specific conditions
+/// (service not running, model not pulled) and falls back to the sanitized
+/// error for everything else.
+fn user_facing_llm_error(err: &anyhow::Error) -> String {
+    let msg = err.to_string();
+    if msg.contains("Is Ollama running") || msg.contains("ollama serve") {
+        "⚠️ I can't reach the reasoning engine right now. Is Ollama running? (`ollama serve`)".to_string()
+    } else if msg.contains("not found, try pulling it first") || msg.contains("pull it first") {
+        "⚠️ The AI model isn't loaded yet. Pull it first (e.g., `ollama pull qwen3:14b`).".to_string()
+    } else {
+        format!("⚠️ Error: {}", providers::sanitize_api_error(&msg))
+    }
+}
+
 fn load_cached_model_preview(workspace_dir: &Path, provider_name: &str) -> Vec<String> {
     let cache_path = workspace_dir.join("state").join(MODEL_CACHE_FILE);
     let Ok(raw) = std::fs::read_to_string(cache_path) else {
@@ -2077,14 +2094,15 @@ async fn process_channel_message(
                     );
                 }
                 if let Some(channel) = target_channel.as_ref() {
+                    let error_text = user_facing_llm_error(&e);
                     if let Some(ref draft_id) = draft_message_id {
                         let _ = channel
-                            .finalize_draft(&msg.reply_target, draft_id, &format!("⚠️ Error: {e}"))
+                            .finalize_draft(&msg.reply_target, draft_id, &error_text)
                             .await;
                     } else {
                         let _ = channel
                             .send(&apply_mode_identity(
-                                SendMessage::new(format!("⚠️ Error: {e}"), &msg.reply_target)
+                                SendMessage::new(error_text, &msg.reply_target)
                                     .in_thread(msg.thread_ts.clone()),
                                 &mode_visual_identity,
                             ))
