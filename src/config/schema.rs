@@ -200,6 +200,10 @@ pub struct Config {
     #[serde(default)]
     pub modes: HashMap<String, ModeConfig>,
 
+    /// Linear integration configuration (`[linear]`).
+    #[serde(default)]
+    pub linear: LinearConfig,
+
     /// Hooks configuration (lifecycle hooks and built-in hook toggles).
     #[serde(default)]
     pub hooks: HooksConfig,
@@ -287,6 +291,20 @@ pub struct ModeConfig {
     /// Allowlist of tool names for this mode (empty = all tools).
     #[serde(default)]
     pub tools: Vec<String>,
+}
+
+// ── Linear Config ────────────────────────────────────────────────
+
+/// Linear API integration configuration (`[linear]` section).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct LinearConfig {
+    /// Enable the Linear tool for the agent.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Linear API key (personal access token or OAuth token).
+    pub api_key: Option<String>,
+    /// Default team ID for issue operations.
+    pub team_id: Option<String>,
 }
 
 // ── Hardware Config (wizard-driven) ─────────────────────────────
@@ -3500,6 +3518,7 @@ impl Default for Config {
             peripherals: PeripheralsConfig::default(),
             agents: HashMap::new(),
             modes: HashMap::new(),
+            linear: LinearConfig::default(),
             hooks: HooksConfig::default(),
             hardware: HardwareConfig::default(),
             query_classification: QueryClassificationConfig::default(),
@@ -4773,6 +4792,7 @@ default_temperature = 0.7
             peripherals: PeripheralsConfig::default(),
             agents: HashMap::new(),
             modes: HashMap::new(),
+            linear: LinearConfig::default(),
             hooks: HooksConfig::default(),
             hardware: HardwareConfig::default(),
             transcription: TranscriptionConfig::default(),
@@ -4948,6 +4968,7 @@ tool_dispatcher = "xml"
             peripherals: PeripheralsConfig::default(),
             agents: HashMap::new(),
             modes: HashMap::new(),
+            linear: LinearConfig::default(),
             hooks: HooksConfig::default(),
             hardware: HardwareConfig::default(),
             transcription: TranscriptionConfig::default(),

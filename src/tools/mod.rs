@@ -37,6 +37,7 @@ pub mod hardware_memory_map;
 pub mod hardware_memory_read;
 pub mod http_request;
 pub mod image_info;
+pub mod linear;
 pub mod memory_forget;
 pub mod memory_recall;
 pub mod memory_store;
@@ -72,6 +73,7 @@ pub use hardware_memory_map::HardwareMemoryMapTool;
 pub use hardware_memory_read::HardwareMemoryReadTool;
 pub use http_request::HttpRequestTool;
 pub use image_info::ImageInfoTool;
+pub use linear::LinearTool;
 pub use memory_forget::MemoryForgetTool;
 pub use memory_recall::MemoryRecallTool;
 pub use memory_store::MemoryStoreTool;
@@ -274,6 +276,20 @@ pub fn all_tools_with_runtime(
             root_config.web_search.max_results,
             root_config.web_search.timeout_secs,
         )));
+    }
+
+    // Linear integration tool (enabled by [linear] config section)
+    if root_config.linear.enabled {
+        if let (Some(api_key), Some(team_id)) = (
+            root_config.linear.api_key.clone(),
+            root_config.linear.team_id.clone(),
+        ) {
+            tool_arcs.push(Arc::new(LinearTool::new(api_key, team_id)));
+        } else {
+            tracing::warn!(
+                "linear.enabled = true but api_key or team_id is missing — tool not registered"
+            );
+        }
     }
 
     // PDF extraction (feature-gated at compile time via rag-pdf)
