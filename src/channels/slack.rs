@@ -473,7 +473,10 @@ impl SlackChannel {
     /// Renders a checkmark followed by a link to the created Linear issue.
     pub fn build_issue_confirmation_blocks(title: &str, url: &str) -> serde_json::Value {
         let title_safe = Self::escape_mrkdwn(title);
-        let text = format!(":white_check_mark: *Issue created:* <{url}|{title_safe}>");
+        // Escape mrkdwn special chars and strip `|` to prevent display-text injection
+        // in the Slack mrkdwn link format `<url|text>`.
+        let url_safe = Self::escape_mrkdwn(url).replace('|', "%7C");
+        let text = format!(":white_check_mark: *Issue created:* <{url_safe}|{title_safe}>");
         serde_json::json!([
             {
                 "type": "section",
@@ -1918,6 +1921,22 @@ mod tests {
         let text = blocks[0]["text"]["text"].as_str().unwrap();
         assert!(text.contains("&lt;Attack&gt;"));
         assert!(!text.contains("<Attack>"));
+    }
+
+    #[test]
+    fn build_issue_confirmation_blocks_url_pipe_injection_prevented() {
+        // A URL containing `|` would let an attacker inject display text in
+        // Slack's mrkdwn link format `<url|text>`. The `|` must be removed.
+        let blocks = SlackChannel::build_issue_confirmation_blocks(
+            "Real Title",
+            "https://linear.app/t/TEAM-1|hacked display text",
+        );
+        let text = blocks[0]["text"]["text"].as_str().unwrap();
+        assert!(
+            !text.contains("|hacked display text"),
+            "pipe injection must be neutralised"
+        );
+        assert!(text.contains("Real Title"), "real title must still appear");
     }
 
     #[tokio::test]

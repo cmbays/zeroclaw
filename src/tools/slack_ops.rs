@@ -17,7 +17,7 @@ pub fn project_name_to_slack_slug(name: &str) -> anyhow::Result<String> {
     let raw: String = name
         .to_lowercase()
         .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
 
     // Collapse consecutive dashes, strip leading/trailing dashes.
@@ -196,11 +196,13 @@ mod tests {
     }
 
     #[test]
-    fn slug_unicode_alphanumeric_preserved() {
-        // Rust's is_alphanumeric() returns true for accented chars (é, ü),
-        // so they pass through unchanged.
-        // "café münchen" → space → '-' → collapse → "café-münchen"
+    fn slug_unicode_chars_become_dashes() {
+        // Non-ASCII characters (é, ü) are not ASCII-alphanumeric, so they
+        // become dashes, which are then collapsed.
+        // "Café München" → lowercase → "café münchen"
+        // → ASCII-only: "caf- m-nchen" → collapse → "caf-m-nchen"
+        // → prefix → "prj-caf-m-nchen"
         let slug = project_name_to_slack_slug("Café München").unwrap();
-        assert_eq!(slug, "prj-café-münchen");
+        assert_eq!(slug, "prj-caf-m-nchen");
     }
 }

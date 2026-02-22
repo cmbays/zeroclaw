@@ -317,10 +317,16 @@ pub struct LinearConfig {
     pub webhook_port: Option<u16>,
     /// HMAC-SHA256 signing secret from the Linear webhook settings page.
     ///
-    /// When set, every inbound request is verified against the
-    /// `linear-signature` header. Strongly recommended in production.
+    /// When set, every inbound Linear request is verified against the
+    /// `linear-signature` header. Required when `webhook_port` is configured.
     #[serde(default)]
     pub webhook_signing_secret: Option<String>,
+    /// HMAC-SHA256 signing secret from the GitHub webhook settings page.
+    ///
+    /// When set, every inbound GitHub request is verified against the
+    /// `X-Hub-Signature-256` header. Optional; omit to accept all GitHub requests.
+    #[serde(default)]
+    pub github_webhook_signing_secret: Option<String>,
 }
 
 // ── Hardware Config (wizard-driven) ─────────────────────────────

@@ -1,4 +1,3 @@
-pub mod response_policy;
 pub mod thread_state;
 
 use std::collections::HashMap;
@@ -7,13 +6,10 @@ use crate::config::{IdentityConfig, VisualIdentityConfig};
 
 /// A fully resolved mode ready for use at runtime.
 pub struct ModeDefinition {
-    pub name: String,
     /// Pre-built system prompt (includes AIEOS persona + response policy).
     pub system_prompt: String,
     /// Visual identity override for outbound messages.
     pub visual_identity: Option<VisualIdentityConfig>,
-    /// Tool allowlist (empty = all tools). Stored for future use in W4A.
-    pub allowed_tools: Vec<String>,
 }
 
 /// Registry of configured modes, built once at startup.
@@ -62,15 +58,6 @@ impl ModeRegistry {
                         );
                     }
                 }
-            }
-
-            // Warn if tool allowlist is configured but not yet enforced
-            if !mode_config.tools.is_empty() {
-                tracing::warn!(
-                    mode = name.as_str(),
-                    "Mode has tool allowlist configured but enforcement is not yet \
-                     implemented (planned for W4A). All tools remain accessible."
-                );
             }
 
             let mode_identity = IdentityConfig {
@@ -123,10 +110,8 @@ impl ModeRegistry {
             modes.insert(
                 name.clone(),
                 ModeDefinition {
-                    name: name.clone(),
                     system_prompt: prompt,
                     visual_identity: mode_config.visual_identity.clone(),
-                    allowed_tools: mode_config.tools.clone(),
                 },
             );
         }

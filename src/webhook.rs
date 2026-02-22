@@ -26,7 +26,8 @@ use std::sync::Arc;
 #[derive(Clone)]
 struct WebhookState {
     bot_token: String,
-    signing_secret: Option<String>,
+    linear_signing_secret: Option<String>,
+    github_signing_secret: Option<String>,
 }
 
 // ── Signature verification ────────────────────────────────────────────────────
@@ -82,7 +83,7 @@ async fn handle_linear(
         .get("linear-signature")
         .and_then(|v| v.to_str().ok());
 
-    if let Err(e) = verify_hmac(&body, sig, state.signing_secret.as_deref()) {
+    if let Err(e) = verify_hmac(&body, sig, state.linear_signing_secret.as_deref()) {
         tracing::warn!("linear webhook: {e}");
         return StatusCode::UNAUTHORIZED;
     }
@@ -109,7 +110,7 @@ async fn handle_github(
         .get("x-hub-signature-256")
         .and_then(|v| v.to_str().ok());
 
-    if let Err(e) = verify_hmac(&body, sig, state.signing_secret.as_deref()) {
+    if let Err(e) = verify_hmac(&body, sig, state.github_signing_secret.as_deref()) {
         tracing::warn!("github webhook: {e}");
         return StatusCode::UNAUTHORIZED;
     }
@@ -208,7 +209,8 @@ pub async fn run(config: &Config) -> Result<()> {
 
     let state = Arc::new(WebhookState {
         bot_token,
-        signing_secret: config.linear.webhook_signing_secret.clone(),
+        linear_signing_secret: config.linear.webhook_signing_secret.clone(),
+        github_signing_secret: config.linear.github_webhook_signing_secret.clone(),
     });
 
     let app = Router::new()
@@ -305,7 +307,8 @@ mod tests {
     async fn dispatch_linear_non_project_event_no_panic() {
         let state = WebhookState {
             bot_token: "xoxb-test".into(),
-            signing_secret: None,
+            linear_signing_secret: None,
+            github_signing_secret: None,
         };
         // Non-Project type — no Slack API call is made; verify no panic.
         dispatch_linear_event(
