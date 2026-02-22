@@ -584,7 +584,9 @@ impl SlackChannel {
             return Ok(());
         }
 
-        let content = format!("[block_action:{action_id}] {value}");
+        let content = format!("[block_action:{action_id}] {value}")
+            .trim_end()
+            .to_string();
         let id_suffix = thread_ts.as_deref().unwrap_or(&channel).to_string();
         let thread_key = format!("{channel}:{id_suffix}");
         let channel_msg = ChannelMessage {
@@ -725,8 +727,8 @@ impl SlackChannel {
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        let content =
-            format!("[view_submission:{callback_id}] title={title} description={description}");
+        let payload_json = serde_json::json!({"title": title, "description": description});
+        let content = format!("[view_submission:{callback_id}] {payload_json}");
 
         let id_suffix = thread_ts.as_deref().unwrap_or(&channel).to_string();
         let thread_key = format!("{channel}:{id_suffix}");
@@ -1875,6 +1877,10 @@ mod tests {
         ch.handle_block_action(&payload, None, &tx).await.unwrap();
         let msg = rx.try_recv().expect("cancel should forward message");
         assert!(msg.content.contains(BK_ACTION_CANCEL));
+        assert!(
+            !msg.content.ends_with(' '),
+            "content must not have trailing space when value is empty"
+        );
     }
 
     #[tokio::test]
@@ -1993,6 +1999,30 @@ mod tests {
         assert_eq!(msg.reply_target, "C456");
         assert_eq!(msg.thread_ts.as_deref(), Some("1234567890.000001"));
         assert_eq!(msg.channel, "slack");
+    }
+
+    #[tokio::test]
+    async fn view_submission_content_is_unambiguous_when_title_contains_description_key() {
+        // Regression: key=value format breaks if title contains " description="
+        // JSON format must be used so the agent can always parse fields correctly.
+        let ch = wildcard_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let tricky_title = "Fix auth description=leaked";
+        let payload = view_submission_payload("C456:ts", tricky_title, "real description");
+        ch.handle_view_submission(&payload, None, &tx)
+            .await
+            .unwrap();
+        let msg = rx.try_recv().unwrap();
+        // Content must be parseable JSON after the prefix
+        let json_part = msg
+            .content
+            .splitn(2, "] ")
+            .nth(1)
+            .expect("content has prefix");
+        let parsed: serde_json::Value =
+            serde_json::from_str(json_part).expect("content after prefix must be valid JSON");
+        assert_eq!(parsed["title"], tricky_title);
+        assert_eq!(parsed["description"], "real description");
     }
 
     #[tokio::test]
