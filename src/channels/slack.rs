@@ -378,12 +378,25 @@ impl SlackChannel {
 
     // ── Interactive flow helpers ──────────────────────────────────────
 
+    /// Escape Slack mrkdwn special characters in user-supplied strings.
+    ///
+    /// Prevents `<@U123>` @-mentions, injected links (`<url|text>`), and
+    /// formatting breakage from user-controlled content.
+    fn escape_mrkdwn(s: &str) -> String {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+    }
+
     /// Build Block Kit blocks for an issue draft message.
     ///
     /// Renders a summary section followed by Confirm / Edit / Cancel action buttons.
     /// `title` is carried in each button's value so handlers can recover context.
     pub fn build_issue_draft_blocks(title: &str, description: &str) -> serde_json::Value {
-        let summary = format!("*Draft Issue*\n*Title:* {title}\n*Description:* {description}");
+        let title_safe = Self::escape_mrkdwn(title);
+        let description_safe = Self::escape_mrkdwn(description);
+        let summary =
+            format!("*Draft Issue*\n*Title:* {title_safe}\n*Description:* {description_safe}");
         serde_json::json!([
             {
                 "type": "section",
@@ -459,7 +472,8 @@ impl SlackChannel {
     ///
     /// Renders a checkmark followed by a link to the created Linear issue.
     pub fn build_issue_confirmation_blocks(title: &str, url: &str) -> serde_json::Value {
-        let text = format!(":white_check_mark: *Issue created:* <{url}|{title}>");
+        let title_safe = Self::escape_mrkdwn(title);
+        let text = format!(":white_check_mark: *Issue created:* <{url}|{title_safe}>");
         serde_json::json!([
             {
                 "type": "section",
@@ -567,6 +581,7 @@ impl SlackChannel {
 
         if !matches!(action_id.as_str(), BK_ACTION_CONFIRM | BK_ACTION_CANCEL) {
             tracing::debug!("Slack: block_action unknown action_id: {action_id}");
+            return Ok(());
         }
 
         let content = format!("[block_action:{action_id}] {value}");
@@ -1863,15 +1878,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn block_action_unknown_action_id_still_forwards() {
+    async fn block_action_unknown_action_id_dropped() {
         let ch = wildcard_channel();
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let payload = block_action_payload("unknown_action", "val");
         ch.handle_block_action(&payload, None, &tx).await.unwrap();
-        let msg = rx
-            .try_recv()
-            .expect("unknown action_id should still forward");
-        assert!(msg.content.contains("unknown_action"));
+        assert!(
+            rx.try_recv().is_err(),
+            "unknown action_id should be dropped, not forwarded"
+        );
+    }
+
+    #[test]
+    fn escape_mrkdwn_replaces_special_chars() {
+        assert_eq!(SlackChannel::escape_mrkdwn("a & b"), "a &amp; b");
+        assert_eq!(SlackChannel::escape_mrkdwn("<@U123>"), "&lt;@U123&gt;");
+        assert_eq!(
+            SlackChannel::escape_mrkdwn("<https://evil.com|click>"),
+            "&lt;https://evil.com|click&gt;"
+        );
+        assert_eq!(SlackChannel::escape_mrkdwn("no specials"), "no specials");
+    }
+
+    #[test]
+    fn build_issue_draft_blocks_escapes_mrkdwn_in_title_and_description() {
+        let blocks = SlackChannel::build_issue_draft_blocks("<@U999> attack", "& <script>");
+        let text = blocks[0]["text"]["text"].as_str().unwrap();
+        assert!(text.contains("&lt;@U999&gt;"), "< and > should be escaped");
+        assert!(text.contains("&amp;"), "& should be escaped");
+        assert!(!text.contains("<@U999>"), "raw mention must not appear");
+    }
+
+    #[test]
+    fn build_issue_confirmation_blocks_escapes_title() {
+        let blocks = SlackChannel::build_issue_confirmation_blocks(
+            "<Attack>",
+            "https://linear.app/t/TEAM-1",
+        );
+        let text = blocks[0]["text"]["text"].as_str().unwrap();
+        assert!(text.contains("&lt;Attack&gt;"));
+        assert!(!text.contains("<Attack>"));
     }
 
     #[tokio::test]
