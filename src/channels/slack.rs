@@ -306,16 +306,16 @@ impl SlackChannel {
     /// [`INACTIVITY_TIMEOUT`].
     fn reset_inactivity_timer(&self, thread_key: &str, channel: &str, thread_ts: &str) {
         // Abort previous timer for this thread, if any.
-        if let Ok(mut timers) = self.timers.lock() {
-            if let Some(handle) = timers.remove(thread_key) {
-                handle.abort();
-            }
-        }
+        self.timers
+            .lock()
+            .expect("timers mutex poisoned")
+            .remove(thread_key)
+            .map(|h| h.abort());
 
         let wake_sleep = Arc::clone(&self.wake_sleep);
-        let timers = Arc::clone(&self.timers);
         let thread_key_owned = thread_key.to_string();
         let bot_token = self.bot_token.clone();
+        let http_client = self.http_client();
         let channel_owned = channel.to_string();
         let thread_ts_owned = thread_ts.to_string();
 
@@ -325,33 +325,43 @@ impl SlackChannel {
             wake_sleep.mark_sleeping(&thread_key_owned);
             tracing::info!("Slack: thread {thread_key_owned} went to sleep (inactivity)");
 
-            // Remove our own handle from the map.
-            if let Ok(mut t) = timers.lock() {
-                t.remove(&thread_key_owned);
-            }
-
             // Post sleep notification.
-            let client = reqwest::Client::new();
             let body = serde_json::json!({
                 "channel": channel_owned,
                 "thread_ts": thread_ts_owned,
                 "text": "Going to sleep — @mention me to wake up :zzz:"
             });
-            if let Err(e) = client
+            match http_client
                 .post("https://slack.com/api/chat.postMessage")
                 .bearer_auth(&bot_token)
                 .json(&body)
                 .send()
                 .await
             {
-                tracing::warn!("Slack: failed to post sleep notification: {e}");
+                Err(e) => {
+                    tracing::warn!("Slack: failed to post sleep notification: {e}");
+                }
+                Ok(resp) => match resp.json::<serde_json::Value>().await {
+                    Ok(data) if data.get("ok") != Some(&serde_json::Value::Bool(true)) => {
+                        let err = data
+                            .get("error")
+                            .and_then(|e| e.as_str())
+                            .unwrap_or("unknown");
+                        tracing::warn!("Slack: sleep notification rejected by API: {err}");
+                    }
+                    Err(e) => {
+                        tracing::warn!("Slack: failed to parse sleep notification response: {e}");
+                    }
+                    Ok(_) => {}
+                },
             }
         })
         .abort_handle();
 
-        if let Ok(mut timers) = self.timers.lock() {
-            timers.insert(thread_key.to_string(), handle);
-        }
+        self.timers
+            .lock()
+            .expect("timers mutex poisoned")
+            .insert(thread_key.to_string(), handle);
     }
 
     /// Build the JSON body for `chat.postMessage` from a `SendMessage`.
