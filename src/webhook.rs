@@ -12,7 +12,7 @@ use crate::tools::slack_ops;
 use anyhow::{bail, Result};
 use axum::{
     body::Bytes,
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::{HeaderMap, StatusCode},
     routing::post,
     Router,
@@ -199,6 +199,13 @@ pub async fn run(config: &Config) -> Result<()> {
         .map(|s| s.bot_token.clone())
         .ok_or_else(|| anyhow::anyhow!("webhook: [channels.slack] bot_token required"))?;
 
+    if config.linear.webhook_signing_secret.is_none() {
+        bail!(
+            "webhook: [linear].webhook_signing_secret must be set when webhook_port is configured. \
+             Refusing to start without signature verification."
+        );
+    }
+
     let state = Arc::new(WebhookState {
         bot_token,
         signing_secret: config.linear.webhook_signing_secret.clone(),
@@ -207,6 +214,7 @@ pub async fn run(config: &Config) -> Result<()> {
     let app = Router::new()
         .route("/webhook/linear", post(handle_linear))
         .route("/webhook/github", post(handle_github))
+        .layer(DefaultBodyLimit::max(65_536)) // 64 KB — matches gateway MAX_BODY_SIZE
         .with_state(state);
 
     let addr = format!("0.0.0.0:{port}");
@@ -271,5 +279,39 @@ mod tests {
     #[test]
     fn constant_time_eq_different_content() {
         assert!(!constant_time_eq(b"abc", b"xyz"));
+    }
+
+    #[test]
+    fn constant_time_eq_empty_buffers_equal() {
+        assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn verify_hmac_empty_provided_after_prefix_strip() {
+        // Header is exactly "sha256=" (empty hex after stripping prefix).
+        assert!(verify_hmac(b"payload", Some("sha256="), Some("secret")).is_err());
+    }
+
+    #[test]
+    fn dispatch_github_ignores_non_merged_closed_pr() {
+        // action="closed", merged=false → just logs, no panic.
+        dispatch_github_event(&serde_json::json!({
+            "action": "closed",
+            "pull_request": { "merged": false, "title": "Test", "html_url": "https://github.com/test" }
+        }));
+    }
+
+    #[tokio::test]
+    async fn dispatch_linear_non_project_event_no_panic() {
+        let state = WebhookState {
+            bot_token: "xoxb-test".into(),
+            signing_secret: None,
+        };
+        // Non-Project type — no Slack API call is made; verify no panic.
+        dispatch_linear_event(
+            &state,
+            &serde_json::json!({"type": "Issue", "action": "update"}),
+        )
+        .await;
     }
 }

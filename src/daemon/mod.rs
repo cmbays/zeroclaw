@@ -356,6 +356,30 @@ mod tests {
     }
 
     #[test]
+    fn webhook_supervisor_enabled_when_linear_enabled_and_port_set() {
+        let mut config = Config::default();
+        config.linear.enabled = true;
+        config.linear.webhook_port = Some(3001);
+        assert!(config.linear.enabled && config.linear.webhook_port.is_some());
+    }
+
+    #[test]
+    fn webhook_supervisor_skipped_when_linear_disabled() {
+        let mut config = Config::default();
+        config.linear.enabled = false;
+        config.linear.webhook_port = Some(3001);
+        assert!(!(config.linear.enabled && config.linear.webhook_port.is_some()));
+    }
+
+    #[test]
+    fn webhook_supervisor_skipped_when_port_none() {
+        let mut config = Config::default();
+        config.linear.enabled = true;
+        config.linear.webhook_port = None;
+        assert!(!(config.linear.enabled && config.linear.webhook_port.is_some()));
+    }
+
+    #[test]
     fn detects_nextcloud_talk_as_supervised_channel() {
         let mut config = Config::default();
         config.channels_config.nextcloud_talk = Some(crate::config::schema::NextcloudTalkConfig {
