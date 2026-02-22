@@ -1,0 +1,78 @@
+# ZeroClaw Fork — Docker Compose Stack
+#
+# Three services:
+#   1. zeroclaw: The fork binary (built from source, dev target)
+#   2. ollama:   Local LLM server (Qwen 3 14B)
+#   3. tunnel:   Cloudflare Tunnel for Linear/GitHub webhooks
+#
+# Usage:
+#   docker compose -f docker-compose.fork.yml up -d
+#   docker compose -f docker-compose.fork.yml logs -f zeroclaw
+#
+# First-time Ollama setup:
+#   docker compose -f docker-compose.fork.yml exec ollama ollama pull qwen3:14b
+
+services:
+  # ── ZeroClaw Agent ──
+  zeroclaw:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: dev
+    container_name: zeroclaw-fork
+    restart: unless-stopped
+    environment:
+      - ZEROCLAW_GATEWAY_PORT=42617
+      # Ollama URL (container networking, not host.docker.internal)
+      - PROVIDER=ollama
+      - ZEROCLAW_MODEL=qwen3:14b
+    env_file:
+      - .env
+    volumes:
+      - zeroclaw-config:/zeroclaw-data/.zeroclaw
+      - zeroclaw-workspace:/zeroclaw-data/workspace
+    ports:
+      - "127.0.0.1:42617:42617"
+    depends_on:
+      ollama:
+        condition: service_started
+    networks:
+      - fork-net
+
+  # ── Ollama LLM Server ──
+  ollama:
+    image: ollama/ollama:latest
+    container_name: zeroclaw-ollama
+    restart: unless-stopped
+    volumes:
+      - ollama-models:/root/.ollama
+    ports:
+      - "127.0.0.1:11434:11434"
+    deploy:
+      resources:
+        reservations:
+          memory: 10G
+    networks:
+      - fork-net
+
+  # ── Cloudflare Tunnel (Linear/GitHub webhooks) ──
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    container_name: zeroclaw-tunnel
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN:-}
+    depends_on:
+      - zeroclaw
+    networks:
+      - fork-net
+
+networks:
+  fork-net:
+    driver: bridge
+
+volumes:
+  zeroclaw-config:
+  zeroclaw-workspace:
+  ollama-models:

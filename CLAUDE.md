@@ -1,4 +1,81 @@
-# CLAUDE.md — ZeroClaw Agent Engineering Protocol
+# CLAUDE.md — ZeroClaw Fork (PM Bot)
+
+## Fork Context
+
+This is a personal fork of [ZeroClaw](https://github.com/zeroclaw-labs/zeroclaw) building a
+conversational PM bot in Slack that drives Linear work management, powered by Ollama (Qwen 3 14B).
+
+**Fork surface**: ~1,100 LOC new code on 394k LOC platform (0.3%). 3 modified files + 1 new directory.
+
+### Commands
+
+```bash
+cargo build                    # Debug build (no optional features needed)
+cargo test                     # Run tests
+cargo run                      # Start the agent
+docker compose build           # Build all services
+docker compose up              # Start: zeroclaw + ollama + tunnel
+```
+
+### Branch Strategy
+
+- `main` = upstream mirror (fast-forward only, never commit here)
+- `dev` = integration branch (PRs merge here)
+- `feat/*` = feature branches from `dev`
+
+```bash
+# Upstream sync
+git fetch upstream && git checkout main && git merge --ff-only upstream/main
+git checkout dev && git merge main
+```
+
+### Fork Additions (our code)
+
+| File | Purpose | ~LOC |
+|------|---------|------|
+| `src/modes/mod.rs` | ModeRegistry, ModeConfig | 60 |
+| `src/modes/thread_state.rs` | ThreadModeState, per-thread Agent store | 40 |
+| `src/modes/response_policy.rs` | ResponsePolicySection (PromptSection impl) | 20 |
+| `src/tools/linear.rs` | LinearTool (Tool trait impl, GraphQL) | 400 |
+| `src/wake_sleep.rs` | WakeSleepEngine, timers | 150 |
+| `src/tools/slack_ops.rs` | Channel lifecycle operations | 80 |
+| `src/webhook.rs` | HTTP webhook endpoint | 70 |
+| `modes/pm/identity.json` | PM persona (AIEOS format) | 50 |
+| `modes/pm/skills/` | PM skill manifests | 30 |
+
+### Modified ZeroClaw Files
+
+| File | Change | Risk |
+|------|--------|------|
+| `Cargo.toml` | Feature flags (additive) | Low |
+| `src/channels/slack.rs` | Socket Mode rewrite, BK handlers | Medium |
+| `src/channels/traits.rs` | Add fields to SendMessage | Low |
+| `src/config/schema.rs` | Add `[modes]` section | Low |
+| `src/tools/mod.rs` | Register LinearTool | Low |
+| `src/main.rs` | Startup wiring | Low |
+
+### Fork Rules
+
+1. **Minimize fork surface** — prefer new files over modifying existing ones
+2. **Additive changes** — extend with Optional fields, new config sections, new tool registrations
+3. **Never delete upstream code** — disable via feature flags instead
+4. **Document every modified file** — update the table above
+
+### Planning Docs
+
+All pipeline artifacts: `docs/planning/` (DECISIONS.md, impl-plan.md, breadboard.md, etc.)
+
+### Tech Stack
+
+- **LLM**: Qwen 3 14B via Ollama (ZeroClaw's OllamaProvider)
+- **Slack**: Socket Mode WebSocket (tokio-tungstenite, already in deps)
+- **Linear**: Raw GraphQL over reqwest (already in deps)
+- **Webhooks**: axum HTTP server (already in deps)
+- **Deployment**: Docker Compose (zeroclaw + ollama + cloudflared)
+
+---
+
+# CLAUDE.md — ZeroClaw Agent Engineering Protocol (Upstream)
 
 This file defines the default working protocol for Claude agents in this repository.
 Scope: entire repository.
