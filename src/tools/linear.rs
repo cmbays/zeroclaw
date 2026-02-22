@@ -20,10 +20,15 @@ pub struct LinearTool {
 
 impl LinearTool {
     pub fn new(api_key: String, team_id: String) -> Self {
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .expect("Failed to build Linear HTTP client");
         Self {
             api_key,
             team_id,
-            client: reqwest::Client::new(),
+            client,
         }
     }
 
@@ -50,7 +55,8 @@ impl LinearTool {
             .context("Failed to parse Linear GraphQL response")?;
 
         if let Some(errors) = json.get("errors") {
-            anyhow::bail!("Linear GraphQL errors: {errors}");
+            tracing::warn!("Linear GraphQL errors: {errors}");
+            anyhow::bail!("Linear API request failed — see server logs");
         }
 
         Ok(json["data"].clone())
@@ -63,7 +69,6 @@ impl LinearTool {
         let query = r#"
             mutation CreateIssue($input: IssueCreateInput!) {
                 issueCreate(input: $input) {
-                    success
                     issue {
                         id
                         identifier
@@ -174,7 +179,6 @@ impl LinearTool {
         let query = r#"
             mutation UpdateIssue($id: String!, $input: IssueUpdateInput!) {
                 issueUpdate(id: $id, input: $input) {
-                    success
                     issue {
                         identifier
                         title
