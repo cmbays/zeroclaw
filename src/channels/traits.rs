@@ -22,6 +22,14 @@ pub struct SendMessage {
     pub subject: Option<String>,
     /// Platform thread identifier for threaded replies (e.g. Slack `thread_ts`).
     pub thread_ts: Option<String>,
+    /// Override display name (e.g. Slack `chat:write.customize`).
+    pub username: Option<String>,
+    /// Override icon emoji (e.g. Slack `chat:write.customize`).
+    pub icon_emoji: Option<String>,
+    /// "Also send to channel" for thread replies (Slack `reply_broadcast`).
+    pub reply_broadcast: Option<bool>,
+    /// Block Kit JSON payload (Slack blocks / Discord embeds).
+    pub blocks: Option<serde_json::Value>,
 }
 
 impl SendMessage {
@@ -32,6 +40,10 @@ impl SendMessage {
             recipient: recipient.into(),
             subject: None,
             thread_ts: None,
+            username: None,
+            icon_emoji: None,
+            reply_broadcast: None,
+            blocks: None,
         }
     }
 
@@ -46,12 +58,35 @@ impl SendMessage {
             recipient: recipient.into(),
             subject: Some(subject.into()),
             thread_ts: None,
+            username: None,
+            icon_emoji: None,
+            reply_broadcast: None,
+            blocks: None,
         }
     }
 
     /// Set the thread identifier for threaded replies.
     pub fn in_thread(mut self, thread_ts: Option<String>) -> Self {
         self.thread_ts = thread_ts;
+        self
+    }
+
+    /// Set display name and icon emoji for per-message identity override.
+    pub fn with_identity(mut self, username: Option<String>, icon_emoji: Option<String>) -> Self {
+        self.username = username;
+        self.icon_emoji = icon_emoji;
+        self
+    }
+
+    /// Set Block Kit JSON payload.
+    pub fn with_blocks(mut self, blocks: serde_json::Value) -> Self {
+        self.blocks = Some(blocks);
+        self
+    }
+
+    /// Broadcast a threaded reply to the parent channel.
+    pub fn with_reply_broadcast(mut self, broadcast: bool) -> Self {
+        self.reply_broadcast = Some(broadcast);
         self
     }
 }
@@ -255,5 +290,31 @@ mod tests {
         assert_eq!(received.sender, "tester");
         assert_eq!(received.content, "hello");
         assert_eq!(received.channel, "dummy");
+    }
+
+    #[test]
+    fn send_message_with_identity() {
+        let msg = SendMessage::new("hello", "chan")
+            .with_identity(Some("PM Bot".into()), Some(":robot_face:".into()));
+        assert_eq!(msg.username.as_deref(), Some("PM Bot"));
+        assert_eq!(msg.icon_emoji.as_deref(), Some(":robot_face:"));
+        assert_eq!(msg.content, "hello");
+    }
+
+    #[test]
+    fn send_message_with_blocks() {
+        let blocks =
+            serde_json::json!([{"type": "section", "text": {"type": "mrkdwn", "text": "hi"}}]);
+        let msg = SendMessage::new("fallback", "chan").with_blocks(blocks.clone());
+        assert_eq!(msg.blocks, Some(blocks));
+    }
+
+    #[test]
+    fn send_message_with_reply_broadcast() {
+        let msg = SendMessage::new("hello", "chan")
+            .in_thread(Some("ts123".into()))
+            .with_reply_broadcast(true);
+        assert_eq!(msg.reply_broadcast, Some(true));
+        assert_eq!(msg.thread_ts.as_deref(), Some("ts123"));
     }
 }

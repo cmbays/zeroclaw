@@ -706,13 +706,14 @@ fn token_end(input: &str, from: usize) -> usize {
 
 /// Scrub known secret-like token prefixes from provider error strings.
 ///
-/// Redacts tokens with prefixes like `sk-`, `xoxb-`, `xoxp-`, `ghp_`, `gho_`,
-/// `ghu_`, and `github_pat_`.
+/// Redacts tokens with prefixes like `sk-`, `xoxb-`, `xoxp-`, `xapp-`, `ghp_`,
+/// `gho_`, `ghu_`, and `github_pat_`.
 pub fn scrub_secret_patterns(input: &str) -> String {
-    const PREFIXES: [&str; 7] = [
+    const PREFIXES: [&str; 8] = [
         "sk-",
         "xoxb-",
         "xoxp-",
+        "xapp-",
         "ghp_",
         "gho_",
         "ghu_",
