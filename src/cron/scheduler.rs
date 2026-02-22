@@ -333,6 +333,7 @@ async fn deliver_if_configured(config: &Config, job: &CronJob, output: &str) -> 
                 .ok_or_else(|| anyhow::anyhow!("slack channel not configured"))?;
             let channel = SlackChannel::new(
                 sl.bot_token.clone(),
+                sl.app_token.clone(),
                 sl.channel_id.clone(),
                 sl.allowed_users.clone(),
             );

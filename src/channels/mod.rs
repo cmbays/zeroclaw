@@ -221,6 +221,8 @@ struct ChannelRuntimeContext {
     multimodal: crate::config::MultimodalConfig,
     hooks: Option<Arc<crate::hooks::HookRunner>>,
     non_cli_excluded_tools: Arc<Vec<String>>,
+    mode_registry: Option<Arc<crate::modes::ModeRegistry>>,
+    thread_mode_state: Arc<crate::modes::thread_state::ThreadModeState>,
 }
 
 #[derive(Clone)]
@@ -266,6 +268,55 @@ fn conversation_history_key(msg: &traits::ChannelMessage) -> String {
 
 fn interruption_scope_key(msg: &traits::ChannelMessage) -> String {
     format!("{}_{}_{}", msg.channel, msg.reply_target, msg.sender)
+}
+
+/// Resolve the active mode for a thread, checking both new activations and existing state.
+///
+/// Mode activation only persists for threaded conversations (messages with `thread_ts`).
+/// Non-threaded activations apply to the single message but are not stored — subsequent
+/// non-threaded messages revert to the default persona.
+fn resolve_thread_mode(
+    ctx: &ChannelRuntimeContext,
+    msg: &traits::ChannelMessage,
+) -> Option<String> {
+    let registry = ctx.mode_registry.as_ref()?;
+    // Check for mode activation in message text
+    if let Some(candidate) = crate::modes::parse_mode_activation(&msg.content) {
+        if registry.has_mode(&candidate) {
+            if let Some(ref ts) = msg.thread_ts {
+                ctx.thread_mode_state.set_mode(ts, candidate.clone());
+            }
+            return Some(candidate);
+        }
+        // Mode name parsed but not registered — log for operator visibility
+        tracing::debug!(
+            mode = candidate.as_str(),
+            channel = msg.channel.as_str(),
+            "Unknown mode activation attempted; available: {:?}",
+            registry.mode_names()
+        );
+    }
+    // Check for existing mode on this thread
+    msg.thread_ts
+        .as_ref()
+        .and_then(|ts| ctx.thread_mode_state.get_mode(ts))
+}
+
+/// Apply mode visual identity to a `SendMessage` if active.
+///
+/// **Note on `finalize_draft`**: The `finalize_draft` trait method (Slack `chat.update`)
+/// does not accept identity overrides. Slack preserves the original message's `username`
+/// and `icon_emoji` on update, so the identity set via `send_draft` carries through.
+/// If a future channel implementation does not preserve identity on update, the
+/// `finalize_draft` trait should be extended to accept optional identity overrides.
+fn apply_mode_identity(
+    msg: SendMessage,
+    vi: &Option<crate::config::VisualIdentityConfig>,
+) -> SendMessage {
+    match vi {
+        Some(vi) => msg.with_identity(vi.username.clone(), vi.icon_emoji.clone()),
+        None => msg,
+    }
 }
 
 /// Strip tool-call XML tags from outgoing messages.
@@ -816,6 +867,23 @@ fn is_context_window_overflow_error(err: &anyhow::Error) -> bool {
     ]
     .iter()
     .any(|hint| lower.contains(hint))
+}
+
+/// Produce a user-facing error message for LLM failures.
+///
+/// Translates raw provider error strings into concise, actionable messages
+/// suitable for display in chat channels. Handles Ollama-specific conditions
+/// (service not running, model not pulled) and falls back to the sanitized
+/// error for everything else.
+fn user_facing_llm_error(err: &anyhow::Error) -> String {
+    let msg = err.to_string();
+    if msg.contains("Is Ollama running") || msg.contains("ollama serve") {
+        "⚠️ I can't reach the reasoning engine right now. Is Ollama running? (`ollama serve`)".to_string()
+    } else if msg.contains("not found, try pulling it first") || msg.contains("pull it first") {
+        "⚠️ The AI model isn't loaded yet. Pull it first (e.g., `ollama pull qwen3:14b`).".to_string()
+    } else {
+        format!("⚠️ Error: {}", providers::sanitize_api_error(&msg))
+    }
 }
 
 fn load_cached_model_preview(workspace_dir: &Path, provider_name: &str) -> Vec<String> {
@@ -1524,7 +1592,24 @@ async fn process_channel_message(
         return;
     }
 
-    let history_key = conversation_history_key(&msg);
+    // ── Mode activation and resolution ──────────────────────
+    let active_mode = resolve_thread_mode(&ctx, &msg);
+    let mode_visual_identity = active_mode.as_ref().and_then(|mode_name| {
+        ctx.mode_registry
+            .as_ref()
+            .and_then(|r| r.get_mode(mode_name))
+            .and_then(|m| m.visual_identity.as_ref())
+            .cloned()
+    });
+
+    let history_key = if active_mode.is_some() {
+        match msg.thread_ts.as_ref() {
+            Some(ts) => format!("{}_{}_{}", msg.channel, msg.sender, ts),
+            None => conversation_history_key(&msg),
+        }
+    } else {
+        conversation_history_key(&msg)
+    };
     let route = get_route_selection(ctx.as_ref(), &history_key);
     let runtime_defaults = runtime_defaults_snapshot(ctx.as_ref());
     let active_provider = match get_or_create_provider(ctx.as_ref(), &route.provider).await {
@@ -1537,10 +1622,11 @@ async fn process_channel_message(
             );
             if let Some(channel) = target_channel.as_ref() {
                 let _ = channel
-                    .send(
-                        &SendMessage::new(message, &msg.reply_target)
+                    .send(&apply_mode_identity(
+                        SendMessage::new(message, &msg.reply_target)
                             .in_thread(msg.thread_ts.clone()),
-                    )
+                        &mode_visual_identity,
+                    ))
                     .await;
             }
             return;
@@ -1594,7 +1680,12 @@ async fn process_channel_message(
         }
     }
 
-    let system_prompt = build_channel_system_prompt(ctx.system_prompt.as_str(), &msg.channel);
+    let base_prompt = active_mode
+        .as_ref()
+        .and_then(|name| ctx.mode_registry.as_ref()?.get_mode(name))
+        .map(|m| m.system_prompt.as_str())
+        .unwrap_or(ctx.system_prompt.as_str());
+    let system_prompt = build_channel_system_prompt(base_prompt, &msg.channel);
     let mut history = vec![ChatMessage::system(system_prompt)];
     history.extend(prior_turns);
     let use_streaming = target_channel
@@ -1619,9 +1710,10 @@ async fn process_channel_message(
     let draft_message_id = if use_streaming {
         if let Some(channel) = target_channel.as_ref() {
             match channel
-                .send_draft(
-                    &SendMessage::new("...", &msg.reply_target).in_thread(msg.thread_ts.clone()),
-                )
+                .send_draft(&apply_mode_identity(
+                    SendMessage::new("...", &msg.reply_target).in_thread(msg.thread_ts.clone()),
+                    &mode_visual_identity,
+                ))
                 .await
             {
                 Ok(id) => id,
@@ -1879,17 +1971,19 @@ async fn process_channel_message(
                     {
                         tracing::warn!("Failed to finalize draft: {e}; sending as new message");
                         let _ = channel
-                            .send(
-                                &SendMessage::new(&delivered_response, &msg.reply_target)
+                            .send(&apply_mode_identity(
+                                SendMessage::new(&delivered_response, &msg.reply_target)
                                     .in_thread(msg.thread_ts.clone()),
-                            )
+                                &mode_visual_identity,
+                            ))
                             .await;
                     }
                 } else if let Err(e) = channel
-                    .send(
-                        &SendMessage::new(delivered_response, &msg.reply_target)
+                    .send(&apply_mode_identity(
+                        SendMessage::new(delivered_response, &msg.reply_target)
                             .in_thread(msg.thread_ts.clone()),
-                    )
+                        &mode_visual_identity,
+                    ))
                     .await
                 {
                     eprintln!("  ❌ Failed to reply on {}: {e}", channel.name());
@@ -1957,10 +2051,11 @@ async fn process_channel_message(
                             .await;
                     } else {
                         let _ = channel
-                            .send(
-                                &SendMessage::new(error_text, &msg.reply_target)
+                            .send(&apply_mode_identity(
+                                SendMessage::new(error_text, &msg.reply_target)
                                     .in_thread(msg.thread_ts.clone()),
-                            )
+                                &mode_visual_identity,
+                            ))
                             .await;
                     }
                 }
@@ -1999,16 +2094,18 @@ async fn process_channel_message(
                     );
                 }
                 if let Some(channel) = target_channel.as_ref() {
+                    let error_text = user_facing_llm_error(&e);
                     if let Some(ref draft_id) = draft_message_id {
                         let _ = channel
-                            .finalize_draft(&msg.reply_target, draft_id, &format!("⚠️ Error: {e}"))
+                            .finalize_draft(&msg.reply_target, draft_id, &error_text)
                             .await;
                     } else {
                         let _ = channel
-                            .send(
-                                &SendMessage::new(format!("⚠️ Error: {e}"), &msg.reply_target)
+                            .send(&apply_mode_identity(
+                                SendMessage::new(error_text, &msg.reply_target)
                                     .in_thread(msg.thread_ts.clone()),
-                            )
+                                &mode_visual_identity,
+                            ))
                             .await;
                     }
                 }
@@ -2053,10 +2150,11 @@ async fn process_channel_message(
                         .await;
                 } else {
                     let _ = channel
-                        .send(
-                            &SendMessage::new(error_text, &msg.reply_target)
+                        .send(&apply_mode_identity(
+                            SendMessage::new(error_text, &msg.reply_target)
                                 .in_thread(msg.thread_ts.clone()),
-                        )
+                            &mode_visual_identity,
+                        ))
                         .await;
                 }
             }
@@ -2686,6 +2784,7 @@ fn collect_configured_channels(
             display_name: "Slack",
             channel: Arc::new(SlackChannel::new(
                 sl.bot_token.clone(),
+                sl.app_token.clone(),
                 sl.channel_id.clone(),
                 sl.allowed_users.clone(),
             )),
@@ -3140,9 +3239,42 @@ pub async fn start_channels(config: Config) -> Result<()> {
         native_tools,
         config.skills.prompt_injection_mode,
     );
-    if !native_tools {
-        system_prompt.push_str(&build_tool_instructions(tools_registry.as_ref()));
-    }
+    let tool_instructions_suffix = if !native_tools {
+        let suffix = build_tool_instructions(tools_registry.as_ref());
+        system_prompt.push_str(&suffix);
+        suffix
+    } else {
+        String::new()
+    };
+
+    // ── Mode Layer ──────────────────────────────────────────────
+    let mode_registry = if !config.modes.is_empty() {
+        match crate::modes::ModeRegistry::from_config(
+            &config,
+            &tool_descs,
+            &skills,
+            bootstrap_max_chars,
+            native_tools,
+            config.skills.prompt_injection_mode,
+            &tool_instructions_suffix,
+        ) {
+            Ok(registry) => {
+                let names = registry.mode_names();
+                if !names.is_empty() {
+                    println!("  🎭 Modes:    {}", names.join(", "));
+                }
+                Some(Arc::new(registry))
+            }
+            Err(e) => {
+                tracing::error!("Failed to load configured modes: {e}");
+                eprintln!("  ⚠️ Failed to load modes: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let thread_mode_state = Arc::new(crate::modes::thread_state::ThreadModeState::new());
 
     if !skills.is_empty() {
         println!(
@@ -3275,6 +3407,8 @@ pub async fn start_channels(config: Config) -> Result<()> {
             None
         },
         non_cli_excluded_tools: Arc::new(config.autonomy.non_cli_excluded_tools.clone()),
+        mode_registry,
+        thread_mode_state,
     });
 
     run_message_dispatch_loop(rx, runtime_ctx, max_in_flight_messages).await;
@@ -3488,6 +3622,8 @@ mod tests {
             workspace_dir: Arc::new(std::env::temp_dir()),
             message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
             non_cli_excluded_tools: Arc::new(Vec::new()),
+            mode_registry: None,
+            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
         };
 
         assert!(compact_sender_history(&ctx, &sender));
@@ -3537,6 +3673,8 @@ mod tests {
             workspace_dir: Arc::new(std::env::temp_dir()),
             message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
             non_cli_excluded_tools: Arc::new(Vec::new()),
+            mode_registry: None,
+            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
         };
 
         append_sender_turn(&ctx, &sender, ChatMessage::user("hello"));
@@ -3589,6 +3727,8 @@ mod tests {
             workspace_dir: Arc::new(std::env::temp_dir()),
             message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
             non_cli_excluded_tools: Arc::new(Vec::new()),
+            mode_registry: None,
+            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
         };
 
         assert!(rollback_orphan_user_turn(&ctx, &sender, "pending"));
@@ -4062,6 +4202,8 @@ BTC is currently around $65,000 based on latest tool output."#
             message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
             interrupt_on_new_message: false,
             non_cli_excluded_tools: Arc::new(Vec::new()),
+            mode_registry: None,
+            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
         });
@@ -4121,6 +4263,8 @@ BTC is currently around $65,000 based on latest tool output."#
             message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
             interrupt_on_new_message: false,
             non_cli_excluded_tools: Arc::new(Vec::new()),
+            mode_registry: None,
+            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
         });
@@ -4196,6 +4340,8 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
+            mode_registry: None,
+            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
         });
 
         process_channel_message(
@@ -4255,6 +4401,8 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
+            mode_registry: None,
+            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
         });
 
         process_channel_message(
@@ -4323,6 +4471,8 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
+            mode_registry: None,
+            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
         });
 
         process_channel_message(
@@ -4412,6 +4562,8 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
+            mode_registry: None,
+            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
         });
 
         process_channel_message(
@@ -4483,6 +4635,8 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
+            mode_registry: None,
+            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
         });
 
         process_channel_message(
@@ -4569,6 +4723,8 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
+            mode_registry: None,
+            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
         });
 
         process_channel_message(
@@ -4640,6 +4796,8 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
+            mode_registry: None,
+            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
         });
 
         process_channel_message(
@@ -4700,6 +4858,8 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
+            mode_registry: None,
+            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
         });
 
         process_channel_message(
@@ -4871,6 +5031,8 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
+            mode_registry: None,
+            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
         });
 
         let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(4);
@@ -4951,6 +5113,8 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
+            mode_registry: None,
+            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
         });
 
         let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(8);
@@ -5043,6 +5207,8 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
+            mode_registry: None,
+            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
         });
 
         let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(8);
@@ -5117,6 +5283,8 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
+            mode_registry: None,
+            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
         });
 
         process_channel_message(
@@ -5176,6 +5344,8 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
+            mode_registry: None,
+            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
         });
 
         process_channel_message(
@@ -5692,6 +5862,8 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
+            mode_registry: None,
+            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
         });
 
         process_channel_message(
@@ -5777,6 +5949,8 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
+            mode_registry: None,
+            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
         });
 
         process_channel_message(
@@ -5862,6 +6036,8 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
+            mode_registry: None,
+            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
         });
 
         process_channel_message(
@@ -6411,6 +6587,8 @@ This is an example JSON object for profile settings."#;
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
+            mode_registry: None,
+            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
         });
 
         // Simulate a photo attachment message with [IMAGE:] marker.
@@ -6477,6 +6655,8 @@ This is an example JSON object for profile settings."#;
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
+            mode_registry: None,
+            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
         });
 
         process_channel_message(

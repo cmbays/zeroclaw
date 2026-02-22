@@ -69,6 +69,7 @@ mod identity;
 mod integrations;
 mod memory;
 mod migration;
+mod modes;
 mod multimodal;
 mod observability;
 mod onboard;

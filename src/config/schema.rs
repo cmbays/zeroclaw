@@ -196,6 +196,10 @@ pub struct Config {
     #[serde(default)]
     pub agents: HashMap<String, DelegateAgentConfig>,
 
+    /// Mode configurations for persona-based routing (`[modes]`).
+    #[serde(default)]
+    pub modes: HashMap<String, ModeConfig>,
+
     /// Hooks configuration (lifecycle hooks and built-in hook toggles).
     #[serde(default)]
     pub hooks: HooksConfig,
@@ -247,6 +251,42 @@ fn default_max_depth() -> u32 {
 
 fn default_max_tool_iterations() -> usize {
     10
+}
+
+// ── Mode Layer ──────────────────────────────────────────────────
+
+/// Visual identity override for a mode (Slack username + icon_emoji).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VisualIdentityConfig {
+    /// Display name override (Slack `chat:write.customize`).
+    #[serde(default)]
+    pub username: Option<String>,
+    /// Icon emoji override (e.g. `:clipboard:`).
+    #[serde(default)]
+    pub icon_emoji: Option<String>,
+}
+
+/// Configuration for a single mode (e.g. `[modes.pm]`).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ModeConfig {
+    /// Identity format: "aieos" or "openclaw".
+    #[serde(default = "default_identity_format")]
+    pub identity_format: String,
+    /// Path to AIEOS identity JSON (relative to workspace).
+    #[serde(default)]
+    pub aieos_path: Option<String>,
+    /// Directory containing mode-specific skill manifests.
+    #[serde(default)]
+    pub skills_dir: Option<String>,
+    /// Visual identity for this mode (username + icon_emoji).
+    #[serde(default)]
+    pub visual_identity: Option<VisualIdentityConfig>,
+    /// Response policy text injected into system prompt.
+    #[serde(default)]
+    pub response_policy: Option<String>,
+    /// Allowlist of tool names for this mode (empty = all tools).
+    #[serde(default)]
+    pub tools: Vec<String>,
 }
 
 // ── Hardware Config (wizard-driven) ─────────────────────────────
@@ -3459,6 +3499,7 @@ impl Default for Config {
             cost: CostConfig::default(),
             peripherals: PeripheralsConfig::default(),
             agents: HashMap::new(),
+            modes: HashMap::new(),
             hooks: HooksConfig::default(),
             hardware: HardwareConfig::default(),
             query_classification: QueryClassificationConfig::default(),
@@ -4731,6 +4772,7 @@ default_temperature = 0.7
             cost: CostConfig::default(),
             peripherals: PeripheralsConfig::default(),
             agents: HashMap::new(),
+            modes: HashMap::new(),
             hooks: HooksConfig::default(),
             hardware: HardwareConfig::default(),
             transcription: TranscriptionConfig::default(),
@@ -4905,6 +4947,7 @@ tool_dispatcher = "xml"
             cost: CostConfig::default(),
             peripherals: PeripheralsConfig::default(),
             agents: HashMap::new(),
+            modes: HashMap::new(),
             hooks: HooksConfig::default(),
             hardware: HardwareConfig::default(),
             transcription: TranscriptionConfig::default(),
