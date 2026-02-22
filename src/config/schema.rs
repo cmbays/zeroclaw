@@ -308,6 +308,19 @@ pub struct LinearConfig {
     pub api_key: Option<String>,
     /// Default team ID for issue operations.
     pub team_id: Option<String>,
+    /// Port for the inbound webhook listener.
+    ///
+    /// When set, the daemon spawns an HTTP server on this port to receive
+    /// Linear project events and auto-create Slack channels.
+    /// Omit (or leave unset) to disable the webhook listener.
+    #[serde(default)]
+    pub webhook_port: Option<u16>,
+    /// HMAC-SHA256 signing secret from the Linear webhook settings page.
+    ///
+    /// When set, every inbound request is verified against the
+    /// `linear-signature` header. Strongly recommended in production.
+    #[serde(default)]
+    pub webhook_signing_secret: Option<String>,
 }
 
 // ── Hardware Config (wizard-driven) ─────────────────────────────
