@@ -473,9 +473,10 @@ impl SlackChannel {
     /// Renders a checkmark followed by a link to the created Linear issue.
     pub fn build_issue_confirmation_blocks(title: &str, url: &str) -> serde_json::Value {
         let title_safe = Self::escape_mrkdwn(title);
-        // Escape mrkdwn special chars and strip `|` to prevent display-text injection
-        // in the Slack mrkdwn link format `<url|text>`.
-        let url_safe = Self::escape_mrkdwn(url).replace('|', "%7C");
+        // Percent-encode `|` in the URL to prevent display-text injection in
+        // Slack's mrkdwn link format `<url|text>`. Do not apply escape_mrkdwn to
+        // the URL — HTML entity-encoding `&` to `&amp;` would corrupt query strings.
+        let url_safe = url.replace('|', "%7C");
         let text = format!(":white_check_mark: *Issue created:* <{url_safe}|{title_safe}>");
         serde_json::json!([
             {

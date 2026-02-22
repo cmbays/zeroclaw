@@ -291,9 +291,6 @@ pub struct ModeConfig {
     /// Response policy text injected into system prompt.
     #[serde(default)]
     pub response_policy: Option<String>,
-    /// Allowlist of tool names for this mode (empty = all tools).
-    #[serde(default)]
-    pub tools: Vec<String>,
 }
 
 // ── Linear Config ────────────────────────────────────────────────

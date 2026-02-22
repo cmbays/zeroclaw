@@ -3,7 +3,8 @@
 //! Starts a standalone axum HTTP server on `[linear].webhook_port` and dispatches
 //! verified payloads to the appropriate handler. Each POST handler:
 //! 1. Reads the raw body.
-//! 2. Verifies the HMAC-SHA256 signature against `[linear].webhook_signing_secret`.
+//! 2. Verifies the HMAC-SHA256 signature (Linear uses `[linear].webhook_signing_secret`,
+//!    GitHub uses `[linear].github_webhook_signing_secret`; each is checked independently).
 //! 3. Parses the JSON payload.
 //! 4. Calls the relevant `slack_ops` function.
 
@@ -185,8 +186,9 @@ fn dispatch_github_event(payload: &serde_json::Value) {
 
 /// Start the webhook HTTP listener. Runs until cancelled.
 ///
-/// Requires `config.linear.webhook_port` to be `Some`. If `config.linear.webhook_signing_secret`
-/// is set, all requests must carry a valid HMAC-SHA256 signature.
+/// Requires `config.linear.webhook_port` to be `Some`.
+/// `[linear].webhook_signing_secret` is required — the server refuses to start without it.
+/// `[linear].github_webhook_signing_secret` is optional; omit to accept all GitHub requests.
 pub async fn run(config: &Config) -> Result<()> {
     let port = config
         .linear
