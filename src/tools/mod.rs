@@ -280,14 +280,27 @@ pub fn all_tools_with_runtime(
 
     // Linear integration tool (enabled by [linear] config section)
     if root_config.linear.enabled {
-        if let (Some(api_key), Some(team_id)) = (
-            root_config.linear.api_key.clone(),
-            root_config.linear.team_id.clone(),
-        ) {
-            tool_arcs.push(Arc::new(LinearTool::new(api_key, team_id)));
+        let api_key = root_config
+            .linear
+            .api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
+        let team_id = root_config
+            .linear
+            .team_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
+
+        if let (Some(api_key), Some(team_id)) = (api_key, team_id) {
+            match LinearTool::new(api_key.to_string(), team_id.to_string()) {
+                Ok(tool) => tool_arcs.push(Arc::new(tool)),
+                Err(e) => tracing::warn!("linear: failed to initialize tool — {e}"),
+            }
         } else {
             tracing::warn!(
-                "linear.enabled = true but api_key or team_id is missing — tool not registered"
+                "linear.enabled = true but api_key or team_id is missing or blank — tool not registered"
             );
         }
     }

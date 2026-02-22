@@ -201,6 +201,9 @@ pub struct Config {
     pub modes: HashMap<String, ModeConfig>,
 
     /// Linear integration configuration (`[linear]`).
+    /// Defaults: `enabled=false`, `api_key=None`, `team_id=None`.
+    /// Compatibility: omitting the `[linear]` section is safe — defaults apply.
+    /// Rollback: remove or zero-out the `[linear]` section to disable the integration.
     #[serde(default)]
     pub linear: LinearConfig,
 
@@ -3916,6 +3919,8 @@ impl Config {
                 "config.web_search.brave_api_key",
             )?;
 
+            decrypt_optional_secret(&store, &mut config.linear.api_key, "config.linear.api_key")?;
+
             decrypt_optional_secret(
                 &store,
                 &mut config.storage.provider.config.db_url,
@@ -4399,6 +4404,12 @@ impl Config {
             &store,
             &mut config_to_save.web_search.brave_api_key,
             "config.web_search.brave_api_key",
+        )?;
+
+        encrypt_optional_secret(
+            &store,
+            &mut config_to_save.linear.api_key,
+            "config.linear.api_key",
         )?;
 
         encrypt_optional_secret(
@@ -5007,6 +5018,7 @@ tool_dispatcher = "xml"
         config.composio.api_key = Some("composio-credential".into());
         config.browser.computer_use.api_key = Some("browser-credential".into());
         config.web_search.brave_api_key = Some("brave-credential".into());
+        config.linear.api_key = Some("linear-credential".into());
         config.storage.provider.config.db_url = Some("postgres://user:pw@host/db".into());
 
         config.agents.insert(
@@ -5061,6 +5073,13 @@ tool_dispatcher = "xml"
         assert_eq!(
             store.decrypt(web_search_encrypted).unwrap(),
             "brave-credential"
+        );
+
+        let linear_encrypted = stored.linear.api_key.as_deref().unwrap();
+        assert!(crate::security::SecretStore::is_encrypted(linear_encrypted));
+        assert_eq!(
+            store.decrypt(linear_encrypted).unwrap(),
+            "linear-credential"
         );
 
         let worker = stored.agents.get("worker").unwrap();

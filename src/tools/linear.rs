@@ -19,17 +19,20 @@ pub struct LinearTool {
 }
 
 impl LinearTool {
-    pub fn new(api_key: String, team_id: String) -> Self {
+    /// Construct a `LinearTool` with a proxy-aware HTTP client.
+    ///
+    /// Returns an error if the underlying TLS/proxy configuration is invalid.
+    pub fn new(api_key: String, team_id: String) -> anyhow::Result<Self> {
         let client = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(10))
             .timeout(std::time::Duration::from_secs(30))
             .build()
-            .expect("Failed to build Linear HTTP client");
-        Self {
+            .context("Failed to build Linear HTTP client")?;
+        Ok(Self {
             api_key,
             team_id,
             client,
-        }
+        })
     }
 
     /// Execute a GraphQL query/mutation against the Linear API.
@@ -55,7 +58,11 @@ impl LinearTool {
             .context("Failed to parse Linear GraphQL response")?;
 
         if let Some(errors) = json.get("errors") {
-            tracing::warn!("Linear GraphQL errors: {errors}");
+            let count = errors.as_array().map(|a| a.len()).unwrap_or(0);
+            tracing::warn!(
+                error_count = count,
+                "Linear GraphQL request returned errors"
+            );
             anyhow::bail!("Linear API request failed — see server logs");
         }
 
@@ -202,6 +209,18 @@ impl LinearTool {
         }
         if let Some(v) = args["assignee_id"].as_str() {
             input["assigneeId"] = json!(v);
+        }
+
+        if input.as_object().map_or(true, |o| o.is_empty()) {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(
+                    "At least one field must be provided to update_issue \
+                     (title, description, state_id, or assignee_id)"
+                        .to_string(),
+                ),
+            });
         }
 
         let data = self
@@ -400,14 +419,46 @@ impl Tool for LinearTool {
                     "description": "Filter by workflow state name, e.g. 'In Progress' (list_issues)"
                 }
             },
-            "required": ["operation"]
+            "required": ["operation"],
+            "oneOf": [
+                {
+                    "properties": { "operation": { "const": "create_issue" } },
+                    "required": ["operation", "title"]
+                },
+                {
+                    "properties": { "operation": { "const": "update_issue" } },
+                    "required": ["operation", "issue_id"],
+                    "anyOf": [
+                        { "required": ["title"] },
+                        { "required": ["description"] },
+                        { "required": ["state_id"] },
+                        { "required": ["assignee_id"] }
+                    ]
+                },
+                {
+                    "properties": { "operation": { "const": "get_initiative" } },
+                    "required": ["operation", "initiative_id"]
+                },
+                {
+                    "properties": { "operation": { "const": "list_issues" } },
+                    "required": ["operation"]
+                },
+                {
+                    "properties": { "operation": { "const": "list_templates" } },
+                    "required": ["operation"]
+                }
+            ]
         })
     }
 
     async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
-        let operation = args["operation"]
-            .as_str()
-            .context("'operation' field required")?;
+        let Some(operation) = args["operation"].as_str() else {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some("'operation' field required".to_string()),
+            });
+        };
 
         match operation {
             "create_issue" => self.create_issue(&args).await,
@@ -415,7 +466,11 @@ impl Tool for LinearTool {
             "update_issue" => self.update_issue(&args).await,
             "get_initiative" => self.get_initiative(&args).await,
             "list_templates" => self.list_templates(&args).await,
-            other => anyhow::bail!("Unknown Linear operation: '{other}'"),
+            other => Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(format!("Unknown Linear operation: '{other}'")),
+            }),
         }
     }
 }
@@ -425,7 +480,7 @@ mod tests {
     use super::*;
 
     fn tool() -> LinearTool {
-        LinearTool::new("test-key".into(), "test-team".into())
+        LinearTool::new("test-key".into(), "test-team".into()).expect("build test tool")
     }
 
     #[test]
@@ -455,6 +510,33 @@ mod tests {
     }
 
     #[test]
+    fn parameters_schema_has_per_operation_constraints() {
+        let schema = tool().parameters_schema();
+        let one_of = schema["oneOf"].as_array().unwrap();
+        assert_eq!(one_of.len(), 5);
+        // create_issue requires title
+        let create = one_of
+            .iter()
+            .find(|v| v["properties"]["operation"]["const"] == "create_issue")
+            .unwrap();
+        assert!(create["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v == "title"));
+        // update_issue requires issue_id
+        let update = one_of
+            .iter()
+            .find(|v| v["properties"]["operation"]["const"] == "update_issue")
+            .unwrap();
+        assert!(update["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v == "issue_id"));
+    }
+
+    #[test]
     fn spec_matches_tool_metadata() {
         let t = tool();
         let spec = t.spec();
@@ -465,16 +547,40 @@ mod tests {
 
     #[tokio::test]
     async fn execute_rejects_unknown_operation() {
-        let err = tool()
+        let result = tool()
             .execute(json!({ "operation": "fly_to_moon" }))
             .await
-            .unwrap_err();
-        assert!(err.to_string().contains("Unknown Linear operation"));
+            .unwrap();
+        assert!(!result.success);
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("Unknown Linear operation"));
     }
 
     #[tokio::test]
     async fn execute_rejects_missing_operation() {
-        let err = tool().execute(json!({})).await.unwrap_err();
-        assert!(err.to_string().contains("'operation' field required"));
+        let result = tool().execute(json!({})).await.unwrap();
+        assert!(!result.success);
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("'operation' field required"));
+    }
+
+    #[tokio::test]
+    async fn update_issue_rejects_empty_input() {
+        let result = tool()
+            .execute(json!({ "operation": "update_issue", "issue_id": "issue-uuid" }))
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("At least one field"));
     }
 }
