@@ -226,7 +226,7 @@ impl SlackChannel {
             .and_then(|rest| rest.split('/').next())
             .and_then(|host_port| host_port.split(':').next())
             .unwrap_or("");
-        if !host.ends_with(".slack.com") {
+        if host != "slack.com" && !host.ends_with(".slack.com") {
             anyhow::bail!("Slack: WebSocket URL host must be *.slack.com, got: {host}");
         }
         Ok(())
@@ -424,7 +424,7 @@ impl SlackChannel {
     }
 
     /// Dispatch a parsed Socket Mode envelope to the appropriate handler.
-    /// Returns `Ok(true)` if the tx channel closed (caller should exit).
+    /// Returns `Err` if the message channel closed (caller should exit).
     async fn dispatch_envelope(
         &self,
         envelope: SocketModeEnvelope,
@@ -1002,6 +1002,8 @@ mod tests {
     fn validate_wss_url_rejects_non_slack_host() {
         assert!(SlackChannel::validate_wss_url("wss://evil.com/link").is_err());
         assert!(SlackChannel::validate_wss_url("wss://notslack.com/link").is_err());
+        // Domain boundary check: evil-slack.com must not pass
+        assert!(SlackChannel::validate_wss_url("wss://evil-slack.com/link").is_err());
     }
 
     // ── Event message extraction ──────────────────────────────────
@@ -1024,6 +1026,26 @@ mod tests {
         assert_eq!(text, "hello world");
         assert_eq!(channel, "C456");
         assert_eq!(ts, "1234567890.000001");
+        assert_eq!(thread_ts.as_deref(), Some("1234567890.000001"));
+    }
+
+    #[test]
+    fn extract_event_message_threaded_reply() {
+        let payload = serde_json::json!({
+            "event": {
+                "type": "message",
+                "user": "U123",
+                "text": "reply in thread",
+                "channel": "C456",
+                "ts": "1234567890.000010",
+                "thread_ts": "1234567890.000001"
+            }
+        });
+        let result = SlackChannel::extract_event_message(&payload, "BXXX");
+        assert!(result.is_some());
+        let (_user, _text, _channel, ts, thread_ts) = result.unwrap();
+        assert_eq!(ts, "1234567890.000010");
+        // thread_ts should be the parent thread, not the message ts
         assert_eq!(thread_ts.as_deref(), Some("1234567890.000001"));
     }
 
