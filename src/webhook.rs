@@ -3,7 +3,8 @@
 //! Starts a standalone axum HTTP server on `[linear].webhook_port` and dispatches
 //! verified payloads to the appropriate handler. Each POST handler:
 //! 1. Reads the raw body.
-//! 2. Verifies the HMAC-SHA256 signature against `[linear].webhook_signing_secret`.
+//! 2. Verifies the HMAC-SHA256 signature (Linear uses `[linear].webhook_signing_secret`,
+//!    GitHub uses `[linear].github_webhook_signing_secret`; each is checked independently).
 //! 3. Parses the JSON payload.
 //! 4. Calls the relevant `slack_ops` function.
 
@@ -12,7 +13,7 @@ use crate::tools::slack_ops;
 use anyhow::{bail, Result};
 use axum::{
     body::Bytes,
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::{HeaderMap, StatusCode},
     routing::post,
     Router,
@@ -26,7 +27,8 @@ use std::sync::Arc;
 #[derive(Clone)]
 struct WebhookState {
     bot_token: String,
-    signing_secret: Option<String>,
+    linear_signing_secret: Option<String>,
+    github_signing_secret: Option<String>,
 }
 
 // ── Signature verification ────────────────────────────────────────────────────
@@ -82,7 +84,7 @@ async fn handle_linear(
         .get("linear-signature")
         .and_then(|v| v.to_str().ok());
 
-    if let Err(e) = verify_hmac(&body, sig, state.signing_secret.as_deref()) {
+    if let Err(e) = verify_hmac(&body, sig, state.linear_signing_secret.as_deref()) {
         tracing::warn!("linear webhook: {e}");
         return StatusCode::UNAUTHORIZED;
     }
@@ -109,7 +111,7 @@ async fn handle_github(
         .get("x-hub-signature-256")
         .and_then(|v| v.to_str().ok());
 
-    if let Err(e) = verify_hmac(&body, sig, state.signing_secret.as_deref()) {
+    if let Err(e) = verify_hmac(&body, sig, state.github_signing_secret.as_deref()) {
         tracing::warn!("github webhook: {e}");
         return StatusCode::UNAUTHORIZED;
     }
@@ -137,6 +139,12 @@ async fn dispatch_linear_event(state: &WebhookState, payload: &serde_json::Value
     // Project created → auto-create a Slack channel.
     if type_ == "Project" && action == "create" {
         on_linear_project_create(state, payload).await;
+    } else {
+        tracing::warn!(
+            type_ = type_,
+            action = action,
+            "linear webhook: no handler for this (type, action) pair — event ignored"
+        );
     }
 }
 
@@ -150,6 +158,16 @@ async fn on_linear_project_create(state: &WebhookState, payload: &serde_json::Va
         .pointer("/data/url")
         .and_then(|v| v.as_str())
         .unwrap_or("");
+
+    if url.is_empty() {
+        tracing::warn!(
+            project_name = name,
+            "linear webhook: payload missing data.url — channel topic will be empty"
+        );
+    }
+    if name == "Unnamed Project" {
+        tracing::warn!("linear webhook: payload missing data.name — using fallback name");
+    }
 
     match slack_ops::create_project_channel(&state.bot_token, name, url).await {
         Ok(ch) => tracing::info!("linear webhook: created Slack channel {ch} for '{name}'"),
@@ -166,7 +184,7 @@ fn dispatch_github_event(payload: &serde_json::Value) {
 
     tracing::debug!("github webhook: action={action} merged={merged}");
 
-    // PR merged → log for future lifecycle hooks (stub for now).
+    // PR merged → W8 will post a merge notification to the project Slack channel.
     if action == "closed" && merged {
         let pr_title = payload
             .pointer("/pull_request/title")
@@ -184,8 +202,9 @@ fn dispatch_github_event(payload: &serde_json::Value) {
 
 /// Start the webhook HTTP listener. Runs until cancelled.
 ///
-/// Requires `config.linear.webhook_port` to be `Some`. If `config.linear.webhook_signing_secret`
-/// is set, all requests must carry a valid HMAC-SHA256 signature.
+/// Requires `config.linear.webhook_port` to be `Some`.
+/// `[linear].webhook_signing_secret` is required — the server refuses to start without it.
+/// `[linear].github_webhook_signing_secret` is optional; omit to accept all GitHub requests.
 pub async fn run(config: &Config) -> Result<()> {
     let port = config
         .linear
@@ -199,17 +218,37 @@ pub async fn run(config: &Config) -> Result<()> {
         .map(|s| s.bot_token.clone())
         .ok_or_else(|| anyhow::anyhow!("webhook: [channels.slack] bot_token required"))?;
 
+    if config.linear.webhook_signing_secret.is_none() {
+        bail!(
+            "webhook: [linear].webhook_signing_secret must be set when webhook_port is configured. \
+             Refusing to start without signature verification."
+        );
+    }
+
     let state = Arc::new(WebhookState {
         bot_token,
-        signing_secret: config.linear.webhook_signing_secret.clone(),
+        linear_signing_secret: config.linear.webhook_signing_secret.clone(),
+        github_signing_secret: config.linear.github_webhook_signing_secret.clone(),
     });
 
     let app = Router::new()
         .route("/webhook/linear", post(handle_linear))
         .route("/webhook/github", post(handle_github))
+        .layer(DefaultBodyLimit::max(65_536)) // 64 KB — matches gateway MAX_BODY_SIZE
         .with_state(state);
 
-    let addr = format!("0.0.0.0:{port}");
+    let bind = config
+        .linear
+        .webhook_bind
+        .as_deref()
+        .unwrap_or("0.0.0.0");
+    if bind.parse::<std::net::IpAddr>().is_err() {
+        bail!(
+            "webhook: invalid webhook_bind address '{bind}' \
+             — must be a valid IP address (e.g. 0.0.0.0 or 127.0.0.1)"
+        );
+    }
+    let addr = format!("{bind}:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("webhook: listening on {addr}");
 
@@ -271,5 +310,40 @@ mod tests {
     #[test]
     fn constant_time_eq_different_content() {
         assert!(!constant_time_eq(b"abc", b"xyz"));
+    }
+
+    #[test]
+    fn constant_time_eq_empty_buffers_equal() {
+        assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn verify_hmac_empty_provided_after_prefix_strip() {
+        // Header is exactly "sha256=" (empty hex after stripping prefix).
+        assert!(verify_hmac(b"payload", Some("sha256="), Some("secret")).is_err());
+    }
+
+    #[test]
+    fn dispatch_github_ignores_non_merged_closed_pr() {
+        // action="closed", merged=false → just logs, no panic.
+        dispatch_github_event(&serde_json::json!({
+            "action": "closed",
+            "pull_request": { "merged": false, "title": "Test", "html_url": "https://github.com/test" }
+        }));
+    }
+
+    #[tokio::test]
+    async fn dispatch_linear_non_project_event_no_panic() {
+        let state = WebhookState {
+            bot_token: "xoxb-test".into(),
+            linear_signing_secret: None,
+            github_signing_secret: None,
+        };
+        // Non-Project type — no Slack API call is made; verify no panic.
+        dispatch_linear_event(
+            &state,
+            &serde_json::json!({"type": "Issue", "action": "update"}),
+        )
+        .await;
     }
 }

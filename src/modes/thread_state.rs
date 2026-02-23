@@ -1,6 +1,9 @@
 use parking_lot::RwLock;
 use std::collections::HashMap;
 
+/// Hard cap on tracked threads. At ~100 bytes/entry this is ~1 MB max.
+const MAX_ENTRIES: usize = 10_000;
+
 /// Per-thread mode tracking. Maps thread_ts to mode_name.
 ///
 /// **Eviction**: Entries persist until process restart. Each entry is ~100 bytes
@@ -22,15 +25,23 @@ impl ThreadModeState {
     }
 
     pub fn set_mode(&self, thread_ts: &str, mode_name: String) {
-        self.active_modes
-            .write()
-            .insert(thread_ts.to_string(), mode_name);
+        let mut map = self.active_modes.write();
+        if map.len() >= MAX_ENTRIES && !map.contains_key(thread_ts) {
+            tracing::warn!(
+                capacity = MAX_ENTRIES,
+                "ThreadModeState: at capacity; dropping mode for new thread"
+            );
+            return;
+        }
+        map.insert(thread_ts.to_string(), mode_name);
     }
 
+    #[cfg(test)]
     pub fn clear_mode(&self, thread_ts: &str) {
         self.active_modes.write().remove(thread_ts);
     }
 
+    #[cfg(test)]
     pub fn active_count(&self) -> usize {
         self.active_modes.read().len()
     }
@@ -70,5 +81,37 @@ mod tests {
         assert_eq!(state.active_count(), 2);
         state.clear_mode("ts_1");
         assert_eq!(state.active_count(), 1);
+    }
+
+    #[test]
+    fn set_mode_at_capacity_drops_new_thread() {
+        let state = ThreadModeState::new();
+        for i in 0..MAX_ENTRIES {
+            state.set_mode(&format!("ts_{i}"), "pm".to_string());
+        }
+        assert_eq!(state.active_count(), MAX_ENTRIES);
+        state.set_mode("ts_overflow", "pm".to_string());
+        assert_eq!(
+            state.get_mode("ts_overflow"),
+            None,
+            "new thread beyond capacity must be dropped"
+        );
+        assert_eq!(state.active_count(), MAX_ENTRIES, "count must not increase");
+    }
+
+    #[test]
+    fn set_mode_at_capacity_allows_update_to_existing_thread() {
+        let state = ThreadModeState::new();
+        state.set_mode("ts_existing", "pm".to_string());
+        for i in 0..MAX_ENTRIES - 1 {
+            state.set_mode(&format!("ts_{i}"), "ops".to_string());
+        }
+        assert_eq!(state.active_count(), MAX_ENTRIES);
+        state.set_mode("ts_existing", "updated".to_string());
+        assert_eq!(
+            state.get_mode("ts_existing"),
+            Some("updated".to_string()),
+            "updating existing thread at capacity must succeed"
+        );
     }
 }

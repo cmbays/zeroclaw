@@ -291,9 +291,6 @@ pub struct ModeConfig {
     /// Response policy text injected into system prompt.
     #[serde(default)]
     pub response_policy: Option<String>,
-    /// Allowlist of tool names for this mode (empty = all tools).
-    #[serde(default)]
-    pub tools: Vec<String>,
 }
 
 // ── Linear Config ────────────────────────────────────────────────
@@ -317,10 +314,22 @@ pub struct LinearConfig {
     pub webhook_port: Option<u16>,
     /// HMAC-SHA256 signing secret from the Linear webhook settings page.
     ///
-    /// When set, every inbound request is verified against the
-    /// `linear-signature` header. Strongly recommended in production.
+    /// When set, every inbound Linear request is verified against the
+    /// `linear-signature` header. Required when `webhook_port` is configured.
     #[serde(default)]
     pub webhook_signing_secret: Option<String>,
+    /// HMAC-SHA256 signing secret from the GitHub webhook settings page.
+    ///
+    /// When set, every inbound GitHub request is verified against the
+    /// `X-Hub-Signature-256` header. Optional; omit to accept all GitHub requests.
+    #[serde(default)]
+    pub github_webhook_signing_secret: Option<String>,
+    /// Bind address for the webhook HTTP listener. Default: `"0.0.0.0"` (all interfaces).
+    ///
+    /// Override to `"127.0.0.1"` for local development without a reverse proxy.
+    /// In Docker Compose the default `"0.0.0.0"` is appropriate.
+    #[serde(default)]
+    pub webhook_bind: Option<String>,
 }
 
 // ── Hardware Config (wizard-driven) ─────────────────────────────

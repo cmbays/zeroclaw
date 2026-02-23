@@ -706,14 +706,16 @@ fn token_end(input: &str, from: usize) -> usize {
 
 /// Scrub known secret-like token prefixes from provider error strings.
 ///
-/// Redacts tokens with prefixes like `sk-`, `xoxb-`, `xoxp-`, `xapp-`, `ghp_`,
-/// `gho_`, `ghu_`, and `github_pat_`.
+/// Redacts tokens with prefixes like `sk-`, `xoxb-`, `xoxp-`, `xapp-`, `xoxs-`,
+/// `xoxe-`, `ghp_`, `gho_`, `ghu_`, and `github_pat_`.
 pub fn scrub_secret_patterns(input: &str) -> String {
-    const PREFIXES: [&str; 8] = [
+    const PREFIXES: [&str; 10] = [
         "sk-",
         "xoxb-",
         "xoxp-",
         "xapp-",
+        "xoxs-",
+        "xoxe-",
         "ghp_",
         "gho_",
         "ghu_",
@@ -2762,6 +2764,22 @@ mod tests {
         let input = "failed: github_pat_11AABBC_xyzzy789";
         let result = scrub_secret_patterns(input);
         assert_eq!(result, "failed: [REDACTED]");
+    }
+
+    #[test]
+    fn scrub_xoxs_socket_mode_token() {
+        let input = "auth error: xoxs-1-abc123def456ghi789";
+        let result = scrub_secret_patterns(input);
+        assert!(!result.contains("xoxs-1-abc123"), "xoxs- token must be redacted");
+        assert!(result.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn scrub_xoxe_exported_token() {
+        let input = "token xoxe-2-abc123def456 in request";
+        let result = scrub_secret_patterns(input);
+        assert!(!result.contains("xoxe-2-abc123"), "xoxe- token must be redacted");
+        assert!(result.contains("[REDACTED]"));
     }
 
     // --- parse_provider_profile ---

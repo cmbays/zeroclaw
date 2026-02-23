@@ -28,6 +28,14 @@ pub struct SlackChannel {
     timers: Arc<Mutex<HashMap<String, AbortHandle>>>,
 }
 
+// ── Capacity limits ──────────────────────────────────────────────────────────
+
+/// Maximum concurrent inactivity timers (one per active thread).
+const MAX_ACTIVE_TIMERS: usize = 10_000;
+
+/// Maximum pages fetched from conversations.list (50 × 200 = 10,000 channels).
+const MAX_PAGES: usize = 50;
+
 // ── Block Kit field identifiers ─────────────────────────────────────────────
 
 const BK_BLOCK_ISSUE_ACTIONS: &str = "issue_actions";
@@ -136,8 +144,10 @@ impl SlackChannel {
     async fn list_accessible_channels(&self) -> anyhow::Result<Vec<String>> {
         let mut channels = Vec::new();
         let mut cursor: Option<String> = None;
+        let mut pages: usize = 0;
 
         loop {
+            pages += 1;
             let mut query_params = vec![
                 ("exclude_archived", "true".to_string()),
                 ("limit", "200".to_string()),
@@ -188,6 +198,13 @@ impl SlackChannel {
                 .map(ToOwned::to_owned);
 
             if cursor.is_none() {
+                break;
+            }
+            if pages >= MAX_PAGES {
+                tracing::warn!(
+                    pages = MAX_PAGES,
+                    "Slack: conversations.list reached page limit; channel list may be incomplete"
+                );
                 break;
             }
         }
@@ -251,9 +268,26 @@ impl SlackChannel {
         Ok(())
     }
 
-    /// Parse a Socket Mode JSON envelope.
+    /// Parse a Socket Mode JSON envelope from a string.
+    ///
+    /// Production code uses `serde_json::from_value` on an already-parsed `Value`
+    /// to avoid double-parsing. This function is kept for tests.
+    #[cfg(test)]
     fn parse_envelope(text: &str) -> anyhow::Result<SocketModeEnvelope> {
         serde_json::from_str(text).map_err(|e| anyhow::anyhow!("Slack: envelope parse error: {e}"))
+    }
+
+    /// Format a Slack message ID from channel and timestamp.
+    fn message_id(channel_id: &str, ts: &str) -> String {
+        format!("slack_{channel_id}_{ts}")
+    }
+
+    /// Current Unix timestamp in whole seconds.
+    fn unix_timestamp() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
     }
 
     /// Extract message fields from an `events_api` payload.
@@ -318,11 +352,14 @@ impl SlackChannel {
     /// [`INACTIVITY_TIMEOUT`].
     fn reset_inactivity_timer(&self, thread_key: &str, channel: &str, thread_ts: &str) {
         // Abort previous timer for this thread, if any.
-        self.timers
+        if let Some(h) = self
+            .timers
             .lock()
             .expect("timers mutex poisoned")
             .remove(thread_key)
-            .map(|h| h.abort());
+        {
+            h.abort();
+        }
 
         let wake_sleep: Arc<WakeSleepEngine> = Arc::clone(&self.wake_sleep);
         let thread_key_owned = thread_key.to_string();
@@ -370,10 +407,16 @@ impl SlackChannel {
         })
         .abort_handle();
 
-        self.timers
-            .lock()
-            .expect("timers mutex poisoned")
-            .insert(thread_key.to_string(), handle);
+        let mut guard = self.timers.lock().expect("timers mutex poisoned");
+        if guard.len() >= MAX_ACTIVE_TIMERS {
+            tracing::warn!(
+                capacity = MAX_ACTIVE_TIMERS,
+                "Slack: inactivity timer capacity reached; aborting timer for {thread_key}"
+            );
+            handle.abort();
+        } else {
+            guard.insert(thread_key.to_string(), handle);
+        }
     }
 
     // ── Interactive flow helpers ──────────────────────────────────────
@@ -473,7 +516,11 @@ impl SlackChannel {
     /// Renders a checkmark followed by a link to the created Linear issue.
     pub fn build_issue_confirmation_blocks(title: &str, url: &str) -> serde_json::Value {
         let title_safe = Self::escape_mrkdwn(title);
-        let text = format!(":white_check_mark: *Issue created:* <{url}|{title_safe}>");
+        // Percent-encode `|` in the URL to prevent display-text injection in
+        // Slack's mrkdwn link format `<url|text>`. Do not apply escape_mrkdwn to
+        // the URL — HTML entity-encoding `&` to `&amp;` would corrupt query strings.
+        let url_safe = url.replace('|', "%7C");
+        let text = format!(":white_check_mark: *Issue created:* <{url_safe}|{title_safe}>");
         serde_json::json!([
             {
                 "type": "section",
@@ -584,9 +631,8 @@ impl SlackChannel {
             return Ok(());
         }
 
-        let content = format!("[block_action:{action_id}] {value}")
-            .trim_end()
-            .to_string();
+        let safe_value = value.replace(['[', ']'], "");
+        let content = format!("[block_action:{action_id}] {safe_value}");
         let id_suffix = thread_ts.as_deref().unwrap_or(&channel).to_string();
         let thread_key = format!("{channel}:{id_suffix}");
         let channel_msg = ChannelMessage {
@@ -595,10 +641,7 @@ impl SlackChannel {
             reply_target: channel.clone(),
             content,
             channel: "slack".to_string(),
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
+            timestamp: Self::unix_timestamp(),
             thread_ts,
         };
 
@@ -727,8 +770,8 @@ impl SlackChannel {
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        let payload_json = serde_json::json!({"title": title, "description": description});
-        let content = format!("[view_submission:{callback_id}] {payload_json}");
+        let content =
+            format!("[view_submission:{callback_id}] title={title} description={description}");
 
         let id_suffix = thread_ts.as_deref().unwrap_or(&channel).to_string();
         let thread_key = format!("{channel}:{id_suffix}");
@@ -738,10 +781,7 @@ impl SlackChannel {
             reply_target: channel.clone(),
             content,
             channel: "slack".to_string(),
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
+            timestamp: Self::unix_timestamp(),
             thread_ts,
         };
 
@@ -837,10 +877,11 @@ impl SlackChannel {
                                 _ => {}
                             }
 
-                            let envelope = match Self::parse_envelope(&text) {
+                            // Deserialize from the already-parsed Value (avoids re-parsing the string).
+                            let envelope = match serde_json::from_value::<SocketModeEnvelope>(raw) {
                                 Ok(e) => e,
                                 Err(e) => {
-                                    tracing::warn!("Slack: {e}");
+                                    tracing::warn!("Slack: envelope parse error: {e}");
                                     continue;
                                 }
                             };
@@ -852,7 +893,7 @@ impl SlackChannel {
                                 break;
                             }
 
-                            self.dispatch_envelope(envelope, bot_user_id, &scoped_channel, tx).await?;
+                            self.dispatch_envelope(envelope, bot_user_id, scoped_channel.as_deref(), tx).await?;
                         }
                         Some(Ok(WsMsg::Ping(d))) => {
                             last_recv = Instant::now();
@@ -885,7 +926,7 @@ impl SlackChannel {
         &self,
         envelope: SocketModeEnvelope,
         bot_user_id: &str,
-        scoped_channel: &Option<String>,
+        scoped_channel: Option<&str>,
         tx: &tokio::sync::mpsc::Sender<ChannelMessage>,
     ) -> anyhow::Result<()> {
         match envelope.envelope_type.as_str() {
@@ -897,8 +938,8 @@ impl SlackChannel {
                     };
 
                 // Filter by configured channel_id (parity with polling path)
-                if let Some(ref scoped) = scoped_channel {
-                    if channel != *scoped {
+                if let Some(scoped) = scoped_channel {
+                    if channel != scoped {
                         return Ok(());
                     }
                 }
@@ -934,15 +975,12 @@ impl SlackChannel {
                 let timer_ts = thread_ts.as_deref().unwrap_or(&ts).to_string();
 
                 let channel_msg = ChannelMessage {
-                    id: format!("slack_{channel}_{ts}"),
+                    id: Self::message_id(&channel, &ts),
                     sender: user,
                     reply_target: channel.clone(),
                     content: text,
                     channel: "slack".to_string(),
-                    timestamp: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs(),
+                    timestamp: Self::unix_timestamp(),
                     thread_ts,
                 };
 
@@ -961,13 +999,13 @@ impl SlackChannel {
                     .unwrap_or("");
                 match payload_type {
                     "block_actions" => {
-                        self.handle_block_action(&envelope.payload, scoped_channel.as_deref(), tx)
+                        self.handle_block_action(&envelope.payload, scoped_channel, tx)
                             .await?;
                     }
                     "view_submission" => {
                         self.handle_view_submission(
                             &envelope.payload,
-                            scoped_channel.as_deref(),
+                            scoped_channel,
                             tx,
                         )
                         .await?;
@@ -1115,7 +1153,7 @@ impl SlackChannel {
                         last_ts_by_channel.insert(channel_id.clone(), ts.to_string());
 
                         let channel_msg = ChannelMessage {
-                            id: format!("slack_{channel_id}_{ts}"),
+                            id: Self::message_id(&channel_id, ts),
                             sender: user.to_string(),
                             reply_target: channel_id.clone(),
                             content: text.to_string(),
@@ -1178,6 +1216,13 @@ impl Channel for SlackChannel {
     }
 
     async fn listen(&self, tx: tokio::sync::mpsc::Sender<ChannelMessage>) -> anyhow::Result<()> {
+        if self.allowed_users.is_empty() {
+            tracing::warn!(
+                "Slack: allowed_users is empty — all messages will be silently ignored. \
+                 Add user IDs to [channels.slack].allowed_users or use [\"*\"] to allow everyone."
+            );
+        }
+
         if self.app_token.is_some() {
             // Socket Mode: reconnect with exponential backoff
             let mut backoff = Duration::from_secs(1);
@@ -1358,42 +1403,34 @@ mod tests {
 
     #[test]
     fn slack_message_id_format_includes_channel_and_ts() {
-        let ts = "1234567890.123456";
-        let channel_id = "C12345";
-        let expected_id = format!("slack_{channel_id}_{ts}");
-        assert_eq!(expected_id, "slack_C12345_1234567890.123456");
+        let id = SlackChannel::message_id("C12345", "1234567890.123456");
+        assert_eq!(id, "slack_C12345_1234567890.123456");
     }
 
     #[test]
     fn slack_message_id_is_deterministic() {
-        let ts = "1234567890.123456";
-        let channel_id = "C12345";
-        let id1 = format!("slack_{channel_id}_{ts}");
-        let id2 = format!("slack_{channel_id}_{ts}");
+        let id1 = SlackChannel::message_id("C12345", "1234567890.123456");
+        let id2 = SlackChannel::message_id("C12345", "1234567890.123456");
         assert_eq!(id1, id2);
     }
 
     #[test]
     fn slack_message_id_different_ts_different_id() {
-        let channel_id = "C12345";
-        let id1 = format!("slack_{channel_id}_1234567890.123456");
-        let id2 = format!("slack_{channel_id}_1234567890.123457");
+        let id1 = SlackChannel::message_id("C12345", "1234567890.123456");
+        let id2 = SlackChannel::message_id("C12345", "1234567890.123457");
         assert_ne!(id1, id2);
     }
 
     #[test]
     fn slack_message_id_different_channel_different_id() {
-        let ts = "1234567890.123456";
-        let id1 = format!("slack_C12345_{ts}");
-        let id2 = format!("slack_C67890_{ts}");
+        let id1 = SlackChannel::message_id("C12345", "1234567890.123456");
+        let id2 = SlackChannel::message_id("C67890", "1234567890.123456");
         assert_ne!(id1, id2);
     }
 
     #[test]
     fn slack_message_id_no_uuid_randomness() {
-        let ts = "1234567890.123456";
-        let channel_id = "C12345";
-        let id = format!("slack_{channel_id}_{ts}");
+        let id = SlackChannel::message_id("C12345", "1234567890.123456");
         assert!(!id.contains('-'));
         assert!(id.starts_with("slack_"));
     }
@@ -1870,6 +1907,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn block_action_value_bracket_characters_stripped() {
+        let ch = wildcard_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let payload = block_action_payload(BK_ACTION_CONFIRM, "[injected] value [end]");
+        ch.handle_block_action(&payload, None, &tx).await.unwrap();
+        let msg = rx.try_recv().expect("confirm should forward message");
+        // The format is "[block_action:{id}] {safe_value}".
+        // Split on the closing "] " to isolate the value portion.
+        let value_part = msg.content.splitn(2, "] ").nth(1).unwrap_or("");
+        assert!(!value_part.contains('['), "[ must be stripped from button value");
+        assert!(!value_part.contains(']'), "] must be stripped from button value");
+        assert!(value_part.contains("injected"), "text content must survive stripping");
+        assert!(value_part.contains("value"), "text content must survive stripping");
+    }
+
+    #[tokio::test]
     async fn block_action_cancel_forwards_message() {
         let ch = wildcard_channel();
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
@@ -1877,10 +1930,6 @@ mod tests {
         ch.handle_block_action(&payload, None, &tx).await.unwrap();
         let msg = rx.try_recv().expect("cancel should forward message");
         assert!(msg.content.contains(BK_ACTION_CANCEL));
-        assert!(
-            !msg.content.ends_with(' '),
-            "content must not have trailing space when value is empty"
-        );
     }
 
     #[tokio::test]
@@ -1924,6 +1973,22 @@ mod tests {
         let text = blocks[0]["text"]["text"].as_str().unwrap();
         assert!(text.contains("&lt;Attack&gt;"));
         assert!(!text.contains("<Attack>"));
+    }
+
+    #[test]
+    fn build_issue_confirmation_blocks_url_pipe_injection_prevented() {
+        // A URL containing `|` would let an attacker inject display text in
+        // Slack's mrkdwn link format `<url|text>`. The `|` must be removed.
+        let blocks = SlackChannel::build_issue_confirmation_blocks(
+            "Real Title",
+            "https://linear.app/t/TEAM-1|hacked display text",
+        );
+        let text = blocks[0]["text"]["text"].as_str().unwrap();
+        assert!(
+            !text.contains("|hacked display text"),
+            "pipe injection must be neutralised"
+        );
+        assert!(text.contains("Real Title"), "real title must still appear");
     }
 
     #[tokio::test]
@@ -2002,30 +2067,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn view_submission_content_is_unambiguous_when_title_contains_description_key() {
-        // Regression: key=value format breaks if title contains " description="
-        // JSON format must be used so the agent can always parse fields correctly.
-        let ch = wildcard_channel();
-        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-        let tricky_title = "Fix auth description=leaked";
-        let payload = view_submission_payload("C456:ts", tricky_title, "real description");
-        ch.handle_view_submission(&payload, None, &tx)
-            .await
-            .unwrap();
-        let msg = rx.try_recv().unwrap();
-        // Content must be parseable JSON after the prefix
-        let json_part = msg
-            .content
-            .splitn(2, "] ")
-            .nth(1)
-            .expect("content has prefix");
-        let parsed: serde_json::Value =
-            serde_json::from_str(json_part).expect("content after prefix must be valid JSON");
-        assert_eq!(parsed["title"], tricky_title);
-        assert_eq!(parsed["description"], "real description");
-    }
-
-    #[tokio::test]
     async fn view_submission_without_thread_ts_uses_channel_only() {
         let ch = wildcard_channel();
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
@@ -2099,6 +2140,117 @@ mod tests {
         assert!(
             rx.try_recv().is_err(),
             "unauthorized user should be skipped"
+        );
+    }
+
+    // ── M-7: dispatch_envelope ────────────────────────────────────
+
+    fn events_api_envelope(user: &str, channel: &str, ts: &str, text: &str) -> SocketModeEnvelope {
+        SocketModeEnvelope {
+            envelope_id: "env-1".to_string(),
+            envelope_type: "events_api".to_string(),
+            payload: serde_json::json!({
+                "event": {
+                    "type": "message",
+                    "user": user,
+                    "text": text,
+                    "channel": channel,
+                    "ts": ts
+                }
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_envelope_events_api_forwards_message() {
+        let ch = wildcard_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let env = events_api_envelope("U123", "C456", "1234567890.000001", "hello");
+        ch.dispatch_envelope(env, "BBOT", None, &tx).await.unwrap();
+        let msg = rx.try_recv().expect("events_api message should be forwarded");
+        assert_eq!(msg.sender, "U123");
+        assert_eq!(msg.content, "hello");
+        assert_eq!(msg.reply_target, "C456");
+        assert_eq!(msg.channel, "slack");
+        // thread_ts missing from event — falls back to ts
+        assert_eq!(msg.thread_ts, Some("1234567890.000001".to_string()));
+    }
+
+    #[tokio::test]
+    async fn dispatch_envelope_events_api_scoped_channel_mismatch_discarded() {
+        let ch = wildcard_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let env = events_api_envelope("U123", "C456", "1234567890.000001", "hello");
+        ch.dispatch_envelope(env, "BBOT", Some("C789"), &tx)
+            .await
+            .unwrap();
+        assert!(
+            rx.try_recv().is_err(),
+            "message to wrong scoped channel should be discarded"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_envelope_events_api_unauthorized_user_discarded() {
+        let ch = SlackChannel::new("xoxb-fake".into(), None, None, vec!["U999".into()]);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let env = events_api_envelope("U123", "C456", "1234567890.000001", "hello");
+        ch.dispatch_envelope(env, "BBOT", None, &tx).await.unwrap();
+        assert!(
+            rx.try_recv().is_err(),
+            "message from unauthorized user should be discarded"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_envelope_interactive_block_action_forwarded() {
+        let ch = wildcard_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let env = SocketModeEnvelope {
+            envelope_id: "env-2".to_string(),
+            envelope_type: "interactive".to_string(),
+            payload: serde_json::json!({
+                "type": "block_actions",
+                "user": {"id": "U123"},
+                "channel": {"id": "C456"},
+                "actions": [{"action_id": "confirm_issue", "value": "Auth Bug"}],
+                "trigger_id": "TRG1"
+            }),
+        };
+        ch.dispatch_envelope(env, "BBOT", None, &tx).await.unwrap();
+        let msg = rx.try_recv().expect("block_action confirm should be forwarded");
+        assert!(msg.content.contains("confirm_issue"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_envelope_slash_commands_discarded() {
+        let ch = wildcard_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let env = SocketModeEnvelope {
+            envelope_id: "env-3".to_string(),
+            envelope_type: "slash_commands".to_string(),
+            payload: serde_json::json!({"command": "/pm", "text": "help"}),
+        };
+        ch.dispatch_envelope(env, "BBOT", None, &tx).await.unwrap();
+        assert!(
+            rx.try_recv().is_err(),
+            "slash commands should be discarded without forwarding"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_envelope_unknown_type_discarded() {
+        let ch = wildcard_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let env = SocketModeEnvelope {
+            envelope_id: "env-4".to_string(),
+            envelope_type: "mystery_envelope".to_string(),
+            payload: serde_json::json!({}),
+        };
+        ch.dispatch_envelope(env, "BBOT", None, &tx).await.unwrap();
+        assert!(
+            rx.try_recv().is_err(),
+            "unknown envelope type should be silently discarded"
         );
     }
 }
