@@ -6,15 +6,14 @@
 #   3. tunnel:   Cloudflare Tunnel for Linear/GitHub webhooks
 #
 # Quick start:
-#   1. cp config/config.example.toml config/config.toml
-#      # fill in SLACK_BOT_TOKEN, SLACK_APP_TOKEN, LINEAR_API_KEY, etc.
-#   2. cp .env.fork.example .env.fork
+#   1. Create a Cloudflare tunnel first (Zero Trust → Networks → Tunnels → Add a tunnel).
+#      Configure a Public Hostname: webhooks.<your-domain> → http://zeroclaw-fork:8080
+#   2. cp config/config.example.toml config/config.toml
+#      # fill in bot_token, app_token, linear.api_key, webhook_signing_secret, etc.
+#   3. cp .env.fork.example .env.fork
 #      # fill in CLOUDFLARE_TUNNEL_TOKEN
-#   3. docker compose -f docker-compose.fork.yml up -d
-#   4. docker compose -f docker-compose.fork.yml exec ollama ollama pull qwen3:14b
-#
-# First-time Ollama setup:
-#   docker compose -f docker-compose.fork.yml exec ollama ollama pull qwen3:14b
+#   4. docker compose -f docker-compose.fork.yml up -d
+#   5. docker compose -f docker-compose.fork.yml exec ollama ollama pull qwen3:14b
 
 services:
 
@@ -39,10 +38,11 @@ services:
       # Fork config (bind-mount): copy config/config.example.toml → config/config.toml
       # and fill in real secrets before starting.
       - ./config/config.toml:/zeroclaw-data/.zeroclaw/config.toml:ro
-      # PM persona files: aieos_path and skills_dir resolve relative to workspace_dir.
-      - ./modes:/zeroclaw-data/workspace/modes:ro
-      # Persistent workspace (memory, tool outputs, etc.)
+      # Named volume first so the bind mount below takes precedence for modes/.
       - zeroclaw-workspace:/zeroclaw-data/workspace
+      # PM persona files: aieos_path and skills_dir resolve relative to workspace_dir.
+      # Bind-mounted after the named volume so it shadows the workspace/modes/ path.
+      - ./modes:/zeroclaw-data/workspace/modes:ro
 
     # Webhook port is internal-only; cloudflared routes external traffic to it.
     # The gateway port is also internal-only (no public exposure needed for the fork).
@@ -52,7 +52,7 @@ services:
 
     depends_on:
       ollama:
-        condition: service_started
+        condition: service_healthy
     networks:
       - fork-net
 
@@ -82,6 +82,12 @@ services:
     # Internal-only: zeroclaw reaches Ollama via http://zeroclaw-ollama:11434
     expose:
       - "11434"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
     deploy:
       resources:
         reservations:

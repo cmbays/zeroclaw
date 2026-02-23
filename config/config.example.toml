@@ -11,8 +11,8 @@
 workspace_dir       = "/zeroclaw-data/workspace"
 config_path         = "/zeroclaw-data/.zeroclaw/config.toml"
 
-# Ollama base URL — uses the Docker Compose service name on the shared fork-net.
-# For local runs outside Docker: change to http://localhost:11434
+# ZeroClaw uses api_key as the Ollama base URL (Ollama has no API key).
+# Docker Compose service name is used here; change to http://localhost:11434 for local runs.
 api_key             = "http://zeroclaw-ollama:11434"
 default_provider    = "ollama"
 default_model       = "qwen3:14b"
