@@ -6818,7 +6818,11 @@ This is an example JSON object for profile settings."#;
         let msg = make_channel_msg("<@UBOT> pm", None);
         // Returns the mode but does not store it (no thread_ts to key on)
         assert_eq!(resolve_thread_mode(&ctx, &msg), Some("pm".to_string()));
-        assert_eq!(state.active_count(), 0, "should not persist without thread_ts");
+        assert_eq!(
+            state.active_count(),
+            0,
+            "should not persist without thread_ts"
+        );
     }
 
     #[test]

@@ -37,7 +37,10 @@ struct WebhookState {
 ///
 /// `header_value` should be the raw header value (Linear: bare hex, GitHub: `sha256=<hex>`).
 /// Returns `Ok(())` when the signature is valid or no secret is configured.
-/// Returns `Err` if a secret is present but the signature is missing or invalid.
+/// Returns `Err` if a secret is present but the signature is missing, not valid hex, or invalid.
+///
+/// Comparison is performed via [`hmac::Mac::verify_slice`] which provides
+/// constant-time equality to prevent timing side-channels.
 fn verify_hmac(body: &[u8], header_value: Option<&str>, secret: Option<&str>) -> Result<()> {
     let Some(secret) = secret else {
         return Ok(()); // no secret configured — accept all
@@ -47,29 +50,14 @@ fn verify_hmac(body: &[u8], header_value: Option<&str>, secret: Option<&str>) ->
         .ok_or_else(|| anyhow::anyhow!("webhook: signature header missing"))?
         .trim_start_matches("sha256=");
 
-    let expected = compute_hmac(body, secret);
-    if !constant_time_eq(expected.as_bytes(), provided.as_bytes()) {
-        bail!("webhook: signature mismatch");
-    }
-    Ok(())
-}
+    let provided_bytes = hex::decode(provided)
+        .map_err(|_| anyhow::anyhow!("webhook: signature is not valid hex"))?;
 
-fn compute_hmac(body: &[u8], secret: &str) -> String {
     let mut mac =
         Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts keys of any length");
     mac.update(body);
-    hex::encode(mac.finalize().into_bytes())
-}
-
-/// Constant-time byte comparison to prevent timing attacks.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter()
-        .zip(b.iter())
-        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
-        == 0
+    mac.verify_slice(&provided_bytes)
+        .map_err(|_| anyhow::anyhow!("webhook: signature mismatch"))
 }
 
 // ── Route handlers ────────────────────────────────────────────────────────────
@@ -237,11 +225,7 @@ pub async fn run(config: &Config) -> Result<()> {
         .layer(DefaultBodyLimit::max(65_536)) // 64 KB — matches gateway MAX_BODY_SIZE
         .with_state(state);
 
-    let bind = config
-        .linear
-        .webhook_bind
-        .as_deref()
-        .unwrap_or("0.0.0.0");
+    let bind = config.linear.webhook_bind.as_deref().unwrap_or("0.0.0.0");
     if bind.parse::<std::net::IpAddr>().is_err() {
         bail!(
             "webhook: invalid webhook_bind address '{bind}' \
@@ -262,6 +246,14 @@ pub async fn run(config: &Config) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// Generate a hex-encoded HMAC-SHA256 for test fixture construction.
+    fn compute_hmac(body: &[u8], secret: &str) -> String {
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
+            .expect("HMAC accepts keys of any length");
+        mac.update(body);
+        hex::encode(mac.finalize().into_bytes())
+    }
+
     #[test]
     fn hmac_valid_signature() {
         let body = b"hello world";
@@ -273,6 +265,7 @@ mod tests {
     #[test]
     fn hmac_invalid_signature() {
         let body = b"hello world";
+        // "deadbeef" is valid hex but the wrong HMAC for this body+secret.
         assert!(verify_hmac(body, Some("deadbeef"), Some("mysecret")).is_err());
     }
 
@@ -298,28 +291,15 @@ mod tests {
     }
 
     #[test]
-    fn constant_time_eq_matching() {
-        assert!(constant_time_eq(b"abc", b"abc"));
-    }
-
-    #[test]
-    fn constant_time_eq_different_length() {
-        assert!(!constant_time_eq(b"abc", b"abcd"));
-    }
-
-    #[test]
-    fn constant_time_eq_different_content() {
-        assert!(!constant_time_eq(b"abc", b"xyz"));
-    }
-
-    #[test]
-    fn constant_time_eq_empty_buffers_equal() {
-        assert!(constant_time_eq(b"", b""));
+    fn hmac_non_hex_signature_is_rejected() {
+        // Non-hex characters in the header must be rejected before HMAC comparison.
+        assert!(verify_hmac(b"payload", Some("not-valid-hex!"), Some("secret")).is_err());
     }
 
     #[test]
     fn verify_hmac_empty_provided_after_prefix_strip() {
         // Header is exactly "sha256=" (empty hex after stripping prefix).
+        // hex::decode("") → Ok(vec![]) but verify_slice fails: length mismatch.
         assert!(verify_hmac(b"payload", Some("sha256="), Some("secret")).is_err());
     }
 

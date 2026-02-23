@@ -6,6 +6,10 @@
 use anyhow::{bail, Result};
 use std::sync::LazyLock;
 
+/// Maximum number of pages to scan when resolving a channel by name.
+/// Mirrors the cap used by `SlackChannel::list_accessible_channels`.
+const MAX_PAGES: usize = 50;
+
 // ── Slug helpers ──────────────────────────────────────────────────────────────
 
 /// Convert a Linear project name into a Slack-safe channel slug.
@@ -133,32 +137,72 @@ pub async fn create_project_channel(
 
 /// Resolve a channel ID by exact name match using `conversations.list`.
 ///
-/// Used as a fallback when `name_taken` prevents channel creation.
+/// Paginates up to `MAX_PAGES` pages of 200 channels each, following the same
+/// cursor pattern as `SlackChannel::list_accessible_channels`. Used as a
+/// fallback when `name_taken` prevents channel creation.
 async fn find_channel_id_by_name(bot_token: &str, name: &str) -> Result<String> {
     let client = build_http_client();
-    let resp: serde_json::Value = client
-        .get("https://slack.com/api/conversations.list")
-        .bearer_auth(bot_token)
-        .query(&[("exclude_archived", "true"), ("limit", "200")])
-        .send()
-        .await?
-        .json()
-        .await?;
+    let mut cursor: Option<String> = None;
+    let mut pages: usize = 0;
 
-    resp.get("channels")
-        .and_then(|c| c.as_array())
-        .into_iter()
-        .flatten()
-        .find_map(|ch| {
-            let ch_name = ch.get("name").and_then(|n| n.as_str())?;
-            let id = ch.get("id").and_then(|i| i.as_str())?;
-            if ch_name == name {
-                Some(id.to_string())
-            } else {
-                None
-            }
-        })
-        .ok_or_else(|| anyhow::anyhow!("could not find existing channel #{name}"))
+    loop {
+        pages += 1;
+        let mut query_params = vec![
+            ("exclude_archived", "true".to_string()),
+            ("limit", "200".to_string()),
+        ];
+        if let Some(ref next) = cursor {
+            query_params.push(("cursor", next.clone()));
+        }
+
+        let resp: serde_json::Value = client
+            .get("https://slack.com/api/conversations.list")
+            .bearer_auth(bot_token)
+            .query(&query_params)
+            .send()
+            .await?
+            .json()
+            .await?;
+
+        if let Some(found) = resp
+            .get("channels")
+            .and_then(|c| c.as_array())
+            .into_iter()
+            .flatten()
+            .find_map(|ch| {
+                let ch_name = ch.get("name").and_then(|n| n.as_str())?;
+                let id = ch.get("id").and_then(|i| i.as_str())?;
+                if ch_name == name {
+                    Some(id.to_string())
+                } else {
+                    None
+                }
+            })
+        {
+            return Ok(found);
+        }
+
+        cursor = resp
+            .get("response_metadata")
+            .and_then(|rm| rm.get("next_cursor"))
+            .and_then(|c| c.as_str())
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .map(ToOwned::to_owned);
+
+        if cursor.is_none() {
+            break;
+        }
+        if pages >= MAX_PAGES {
+            tracing::warn!(
+                pages = MAX_PAGES,
+                "slack_ops: conversations.list page limit reached; channel #{name} not found"
+            );
+            break;
+        }
+    }
+
+    anyhow::bail!("could not find existing channel #{name}")
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

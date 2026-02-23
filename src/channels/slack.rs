@@ -78,16 +78,27 @@ impl SlackChannel {
 
     /// Get the bot's own user ID so we can ignore our own messages
     async fn get_bot_user_id(&self) -> Option<String> {
-        let resp: serde_json::Value = self
+        let response = match self
             .http_client()
             .get("https://slack.com/api/auth.test")
             .bearer_auth(&self.bot_token)
             .send()
             .await
-            .ok()?
-            .json()
-            .await
-            .ok()?;
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("Slack: auth.test request failed: {e}");
+                return None;
+            }
+        };
+
+        let resp: serde_json::Value = match response.json().await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("Slack: auth.test response is not valid JSON: {e}");
+                return None;
+            }
+        };
 
         resp.get("user_id")
             .and_then(|u| u.as_str())
@@ -178,7 +189,9 @@ impl SlackChannel {
                 anyhow::bail!("Slack conversations.list failed ({status}): {body}");
             }
 
-            let data: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            let data: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+                anyhow::anyhow!("Slack conversations.list: response is not valid JSON: {e}")
+            })?;
             if data.get("ok") == Some(&serde_json::Value::Bool(false)) {
                 let err = data
                     .get("error")
@@ -684,7 +697,8 @@ impl SlackChannel {
             anyhow::bail!("Slack views.open failed ({status}): {body_text}");
         }
 
-        let parsed: serde_json::Value = serde_json::from_str(&body_text).unwrap_or_default();
+        let parsed: serde_json::Value = serde_json::from_str(&body_text)
+            .map_err(|e| anyhow::anyhow!("Slack views.open: response is not valid JSON: {e}"))?;
         if parsed.get("ok") == Some(&serde_json::Value::Bool(false)) {
             let err = parsed
                 .get("error")
@@ -1003,12 +1017,8 @@ impl SlackChannel {
                             .await?;
                     }
                     "view_submission" => {
-                        self.handle_view_submission(
-                            &envelope.payload,
-                            scoped_channel,
-                            tx,
-                        )
-                        .await?;
+                        self.handle_view_submission(&envelope.payload, scoped_channel, tx)
+                            .await?;
                     }
                     other => {
                         tracing::debug!("Slack: unknown interactive payload type: {other}");
@@ -1916,10 +1926,22 @@ mod tests {
         // The format is "[block_action:{id}] {safe_value}".
         // Split on the closing "] " to isolate the value portion.
         let value_part = msg.content.splitn(2, "] ").nth(1).unwrap_or("");
-        assert!(!value_part.contains('['), "[ must be stripped from button value");
-        assert!(!value_part.contains(']'), "] must be stripped from button value");
-        assert!(value_part.contains("injected"), "text content must survive stripping");
-        assert!(value_part.contains("value"), "text content must survive stripping");
+        assert!(
+            !value_part.contains('['),
+            "[ must be stripped from button value"
+        );
+        assert!(
+            !value_part.contains(']'),
+            "] must be stripped from button value"
+        );
+        assert!(
+            value_part.contains("injected"),
+            "text content must survive stripping"
+        );
+        assert!(
+            value_part.contains("value"),
+            "text content must survive stripping"
+        );
     }
 
     #[tokio::test]
@@ -2167,7 +2189,9 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
         let env = events_api_envelope("U123", "C456", "1234567890.000001", "hello");
         ch.dispatch_envelope(env, "BBOT", None, &tx).await.unwrap();
-        let msg = rx.try_recv().expect("events_api message should be forwarded");
+        let msg = rx
+            .try_recv()
+            .expect("events_api message should be forwarded");
         assert_eq!(msg.sender, "U123");
         assert_eq!(msg.content, "hello");
         assert_eq!(msg.reply_target, "C456");
@@ -2218,7 +2242,9 @@ mod tests {
             }),
         };
         ch.dispatch_envelope(env, "BBOT", None, &tx).await.unwrap();
-        let msg = rx.try_recv().expect("block_action confirm should be forwarded");
+        let msg = rx
+            .try_recv()
+            .expect("block_action confirm should be forwarded");
         assert!(msg.content.contains("confirm_issue"));
     }
 

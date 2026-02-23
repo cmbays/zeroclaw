@@ -275,7 +275,12 @@ mod tests {
 
     fn write_workspace_files(dir: &std::path::Path) {
         for name in &[
-            "SOUL.md", "IDENTITY.md", "USER.md", "AGENTS.md", "TOOLS.md", "HEARTBEAT.md",
+            "SOUL.md",
+            "IDENTITY.md",
+            "USER.md",
+            "AGENTS.md",
+            "TOOLS.md",
+            "HEARTBEAT.md",
             "MEMORY.md",
         ] {
             std::fs::write(dir.join(name), "# Test").unwrap();
