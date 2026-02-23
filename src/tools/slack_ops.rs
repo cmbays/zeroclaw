@@ -102,24 +102,30 @@ pub async fn create_project_channel(
     // 2. Set topic to include bidirectional Linear link.
     let topic = format!("Linear project: {linear_url}");
     // Best-effort: topic is informational; failure doesn't block channel creation.
-    let _ = client
+    if let Err(e) = client
         .post("https://slack.com/api/conversations.setTopic")
         .bearer_auth(bot_token)
         .json(&serde_json::json!({ "channel": channel_id, "topic": topic }))
         .send()
-        .await;
+        .await
+    {
+        tracing::warn!(channel_id, error = %e, "slack_ops: conversations.setTopic failed (best-effort)");
+    }
 
     // 3. Post creation notice.
     let notice = format!(
         ":white_check_mark: Channel created for Linear project *{project_name}*\n{linear_url}"
     );
     // Best-effort: creation notice; failure doesn't block channel creation.
-    let _ = client
+    if let Err(e) = client
         .post("https://slack.com/api/chat.postMessage")
         .bearer_auth(bot_token)
         .json(&serde_json::json!({ "channel": channel_id, "text": notice }))
         .send()
-        .await;
+        .await
+    {
+        tracing::warn!(channel_id, error = %e, "slack_ops: chat.postMessage failed (best-effort)");
+    }
 
     tracing::info!("slack_ops: created #{channel_name} ({channel_id}) for {project_name}");
     Ok(channel_id)

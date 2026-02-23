@@ -139,6 +139,12 @@ async fn dispatch_linear_event(state: &WebhookState, payload: &serde_json::Value
     // Project created → auto-create a Slack channel.
     if type_ == "Project" && action == "create" {
         on_linear_project_create(state, payload).await;
+    } else {
+        tracing::warn!(
+            type_ = type_,
+            action = action,
+            "linear webhook: no handler for this (type, action) pair — event ignored"
+        );
     }
 }
 
@@ -152,6 +158,16 @@ async fn on_linear_project_create(state: &WebhookState, payload: &serde_json::Va
         .pointer("/data/url")
         .and_then(|v| v.as_str())
         .unwrap_or("");
+
+    if url.is_empty() {
+        tracing::warn!(
+            project_name = name,
+            "linear webhook: payload missing data.url — channel topic will be empty"
+        );
+    }
+    if name == "Unnamed Project" {
+        tracing::warn!("linear webhook: payload missing data.name — using fallback name");
+    }
 
     match slack_ops::create_project_channel(&state.bot_token, name, url).await {
         Ok(ch) => tracing::info!("linear webhook: created Slack channel {ch} for '{name}'"),

@@ -58,12 +58,14 @@ impl LinearTool {
             .context("Failed to parse Linear GraphQL response")?;
 
         if let Some(errors) = json.get("errors") {
-            let first_msg = errors
-                .as_array()
+            let arr = errors.as_array();
+            let error_count = arr.map_or(1, |a| a.len());
+            let first_msg = arr
                 .and_then(|a| a.first())
                 .and_then(|e| e.get("message"))
                 .and_then(|m| m.as_str())
                 .unwrap_or("unknown error");
+            tracing::warn!(error_count, errors = %errors, "Linear GraphQL errors");
             anyhow::bail!("Linear API error: {first_msg}");
         }
 
@@ -571,6 +573,43 @@ mod tests {
             .as_deref()
             .unwrap_or("")
             .contains("'operation' field required"));
+    }
+
+    #[test]
+    fn graphql_error_extracts_first_message() {
+        let errors = serde_json::json!([
+            {"message": "Field 'teamId' required"},
+            {"message": "Second error"}
+        ]);
+        let msg = errors
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|e| e.get("message"))
+            .and_then(|m| m.as_str())
+            .unwrap_or("unknown error");
+        assert_eq!(msg, "Field 'teamId' required");
+    }
+
+    #[test]
+    fn graphql_error_falls_back_to_unknown_when_no_message_field() {
+        let errors = serde_json::json!([{"code": 400}]);
+        let msg = errors
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|e| e.get("message"))
+            .and_then(|m| m.as_str())
+            .unwrap_or("unknown error");
+        assert_eq!(msg, "unknown error");
+    }
+
+    #[test]
+    fn graphql_missing_data_field_is_error() {
+        let json = serde_json::json!({"other": true});
+        let result = json
+            .get("data")
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("missing"));
+        assert!(result.is_err());
     }
 
     #[tokio::test]

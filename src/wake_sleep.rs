@@ -108,6 +108,11 @@ impl WakeSleepEngine {
         let mut states = self.states.lock().expect("wake_sleep mutex poisoned");
         if states.contains_key(thread_key) {
             states.insert(thread_key.to_string(), WakeState::Sleeping);
+        } else {
+            tracing::debug!(
+                thread_key,
+                "WakeSleepEngine: mark_sleeping called for untracked thread (capacity drop path)"
+            );
         }
     }
 
@@ -171,9 +176,20 @@ mod tests {
     #[test]
     fn woken_thread_is_now_awake() {
         let e = engine();
+        e.on_event("ch:ts", false); // track the thread first
         e.mark_sleeping("ch:ts");
         e.on_event("ch:ts", true); // wake
         assert!(e.is_awake("ch:ts"));
+    }
+
+    #[test]
+    fn mark_sleeping_untracked_thread_is_noop() {
+        let e = engine();
+        // Never register via on_event — thread is untracked (over-capacity path).
+        e.mark_sleeping("ch:never_seen");
+        // on_event must return Forward (not Discard) because the thread must not
+        // have been silently inserted as Sleeping by mark_sleeping.
+        assert_eq!(e.on_event("ch:never_seen", false), EventDecision::Forward);
     }
 
     #[test]

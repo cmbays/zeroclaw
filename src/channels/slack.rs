@@ -980,10 +980,7 @@ impl SlackChannel {
                     reply_target: channel.clone(),
                     content: text,
                     channel: "slack".to_string(),
-                    timestamp: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs(),
+                    timestamp: Self::unix_timestamp(),
                     thread_ts,
                 };
 
@@ -1907,6 +1904,22 @@ mod tests {
         assert!(msg.content.contains("Fix auth bug"));
         assert_eq!(msg.channel, "slack");
         assert_eq!(msg.reply_target, "C456");
+    }
+
+    #[tokio::test]
+    async fn block_action_value_bracket_characters_stripped() {
+        let ch = wildcard_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let payload = block_action_payload(BK_ACTION_CONFIRM, "[injected] value [end]");
+        ch.handle_block_action(&payload, None, &tx).await.unwrap();
+        let msg = rx.try_recv().expect("confirm should forward message");
+        // The format is "[block_action:{id}] {safe_value}".
+        // Split on the closing "] " to isolate the value portion.
+        let value_part = msg.content.splitn(2, "] ").nth(1).unwrap_or("");
+        assert!(!value_part.contains('['), "[ must be stripped from button value");
+        assert!(!value_part.contains(']'), "] must be stripped from button value");
+        assert!(value_part.contains("injected"), "text content must survive stripping");
+        assert!(value_part.contains("value"), "text content must survive stripping");
     }
 
     #[tokio::test]
