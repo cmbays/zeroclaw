@@ -226,6 +226,12 @@ pub async fn run(config: &Config) -> Result<()> {
         .webhook_bind
         .as_deref()
         .unwrap_or("0.0.0.0");
+    if bind.parse::<std::net::IpAddr>().is_err() {
+        bail!(
+            "webhook: invalid webhook_bind address '{bind}' \
+             — must be a valid IP address (e.g. 0.0.0.0 or 127.0.0.1)"
+        );
+    }
     let addr = format!("{bind}:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("webhook: listening on {addr}");

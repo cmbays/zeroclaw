@@ -101,9 +101,14 @@ impl WakeSleepEngine {
     /// Transition a thread to the sleeping state.
     ///
     /// Called by the inactivity timer spawned in `slack.rs` on expiry.
+    /// No-op for unknown threads: timers are only spawned for tracked threads,
+    /// so an untracked key here means the thread was over-capacity and was
+    /// never inserted — silently dropping the transition is correct.
     pub fn mark_sleeping(&self, thread_key: &str) {
         let mut states = self.states.lock().expect("wake_sleep mutex poisoned");
-        states.insert(thread_key.to_string(), WakeState::Sleeping);
+        if states.contains_key(thread_key) {
+            states.insert(thread_key.to_string(), WakeState::Sleeping);
+        }
     }
 
     /// Return whether a thread is currently awake.
