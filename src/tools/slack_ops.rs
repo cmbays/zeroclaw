@@ -4,6 +4,7 @@
 //! bidirectional links between Slack channels and Linear projects.
 
 use anyhow::{bail, Result};
+use std::sync::LazyLock;
 
 // ── Slug helpers ──────────────────────────────────────────────────────────────
 
@@ -13,11 +14,11 @@ use anyhow::{bail, Result};
 /// truncate to 80 chars (Slack limit).
 ///
 /// `"Auth Refactor"` → `"prj-auth-refactor"`, `"Q1/2026 -- Infra"` → `"prj-q1-2026-infra"`
-pub fn project_name_to_slack_slug(name: &str) -> String {
+pub fn project_name_to_slack_slug(name: &str) -> anyhow::Result<String> {
     let raw: String = name
         .to_lowercase()
         .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
 
     // Collapse consecutive dashes, strip leading/trailing dashes.
@@ -27,32 +28,27 @@ pub fn project_name_to_slack_slug(name: &str) -> String {
         .collect::<Vec<_>>()
         .join("-");
 
-    let slug = format!("prj-{collapsed}");
-    slug.chars().take(80).collect()
-}
-
-/// Scan a Slack channel topic/description for an embedded Linear project URL.
-///
-/// Returns the URL if found, `None` otherwise.
-pub fn detect_channel_project_link(text: &str) -> Option<String> {
-    for word in text.split_whitespace() {
-        if word.starts_with("https://linear.app/") && word.contains("/project/") {
-            return Some(
-                word.trim_end_matches(|c: char| !c.is_alphanumeric())
-                    .to_string(),
-            );
-        }
+    if collapsed.is_empty() {
+        anyhow::bail!("project name '{name}' produces an empty channel slug");
     }
-    None
+
+    let slug = format!("prj-{collapsed}");
+    Ok(slug.chars().take(80).collect())
 }
 
 // ── Channel lifecycle ─────────────────────────────────────────────────────────
 
-fn build_http_client() -> reqwest::Client {
+/// Shared HTTP client. `reqwest::Client` is cheaply cloneable (reference-counted
+/// internally), so all callers share a single connection pool.
+static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
-        .unwrap_or_default()
+        .expect("reqwest Client::builder should not fail with basic timeout")
+});
+
+fn build_http_client() -> reqwest::Client {
+    HTTP_CLIENT.clone()
 }
 
 /// Create a `#prj-<slug>` Slack channel for a new Linear project.
@@ -70,7 +66,7 @@ pub async fn create_project_channel(
     linear_url: &str,
 ) -> Result<String> {
     let client = build_http_client();
-    let channel_name = project_name_to_slack_slug(project_name);
+    let channel_name = project_name_to_slack_slug(project_name)?;
 
     // 1. Create the channel.
     let create_resp: serde_json::Value = client
@@ -105,23 +101,31 @@ pub async fn create_project_channel(
 
     // 2. Set topic to include bidirectional Linear link.
     let topic = format!("Linear project: {linear_url}");
-    let _ = client
+    // Best-effort: topic is informational; failure doesn't block channel creation.
+    if let Err(e) = client
         .post("https://slack.com/api/conversations.setTopic")
         .bearer_auth(bot_token)
         .json(&serde_json::json!({ "channel": channel_id, "topic": topic }))
         .send()
-        .await;
+        .await
+    {
+        tracing::warn!(channel_id, error = %e, "slack_ops: conversations.setTopic failed (best-effort)");
+    }
 
     // 3. Post creation notice.
     let notice = format!(
         ":white_check_mark: Channel created for Linear project *{project_name}*\n{linear_url}"
     );
-    let _ = client
+    // Best-effort: creation notice; failure doesn't block channel creation.
+    if let Err(e) = client
         .post("https://slack.com/api/chat.postMessage")
         .bearer_auth(bot_token)
         .json(&serde_json::json!({ "channel": channel_id, "text": notice }))
         .send()
-        .await;
+        .await
+    {
+        tracing::warn!(channel_id, error = %e, "slack_ops: chat.postMessage failed (best-effort)");
+    }
 
     tracing::info!("slack_ops: created #{channel_name} ({channel_id}) for {project_name}");
     Ok(channel_id)
@@ -166,7 +170,7 @@ mod tests {
     #[test]
     fn slug_simple_name() {
         assert_eq!(
-            project_name_to_slack_slug("Auth Refactor"),
+            project_name_to_slack_slug("Auth Refactor").unwrap(),
             "prj-auth-refactor"
         );
     }
@@ -174,37 +178,44 @@ mod tests {
     #[test]
     fn slug_special_chars() {
         assert_eq!(
-            project_name_to_slack_slug("Q1/2026 -- Infra"),
+            project_name_to_slack_slug("Q1/2026 -- Infra").unwrap(),
             "prj-q1-2026-infra"
         );
     }
 
     #[test]
     fn slug_already_lowercase() {
-        assert_eq!(project_name_to_slack_slug("billing"), "prj-billing");
+        assert_eq!(
+            project_name_to_slack_slug("billing").unwrap(),
+            "prj-billing"
+        );
     }
 
     #[test]
     fn slug_truncates_at_80_chars() {
         let long_name = "a".repeat(90);
-        let slug = project_name_to_slack_slug(&long_name);
+        let slug = project_name_to_slack_slug(&long_name).unwrap();
         assert!(slug.len() <= 80, "slug must not exceed 80 chars");
     }
 
     #[test]
-    fn detect_link_present() {
-        let text = "Linear project: https://linear.app/acme/project/auth-refactor/ABC123";
-        assert!(detect_channel_project_link(text).is_some());
+    fn slug_empty_string_returns_error() {
+        assert!(project_name_to_slack_slug("").is_err());
     }
 
     #[test]
-    fn detect_link_absent() {
-        assert!(detect_channel_project_link("no links here").is_none());
+    fn slug_all_special_chars_returns_error() {
+        assert!(project_name_to_slack_slug("!!!???###").is_err());
     }
 
     #[test]
-    fn detect_link_non_project_linear_url() {
-        let text = "See https://linear.app/acme/issue/ENG-123";
-        assert!(detect_channel_project_link(text).is_none());
+    fn slug_unicode_chars_become_dashes() {
+        // Non-ASCII characters (é, ü) are not ASCII-alphanumeric, so they
+        // become dashes, which are then collapsed.
+        // "Café München" → lowercase → "café münchen"
+        // → ASCII-only: "caf- m-nchen" → collapse → "caf-m-nchen"
+        // → prefix → "prj-caf-m-nchen"
+        let slug = project_name_to_slack_slug("Café München").unwrap();
+        assert_eq!(slug, "prj-caf-m-nchen");
     }
 }
