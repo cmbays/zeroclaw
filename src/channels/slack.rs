@@ -28,6 +28,14 @@ pub struct SlackChannel {
     timers: Arc<Mutex<HashMap<String, AbortHandle>>>,
 }
 
+// ── Capacity limits ──────────────────────────────────────────────────────────
+
+/// Maximum concurrent inactivity timers (one per active thread).
+const MAX_ACTIVE_TIMERS: usize = 10_000;
+
+/// Maximum pages fetched from conversations.list (50 × 200 = 10,000 channels).
+const MAX_PAGES: usize = 50;
+
 // ── Block Kit field identifiers ─────────────────────────────────────────────
 
 const BK_BLOCK_ISSUE_ACTIONS: &str = "issue_actions";
@@ -136,8 +144,10 @@ impl SlackChannel {
     async fn list_accessible_channels(&self) -> anyhow::Result<Vec<String>> {
         let mut channels = Vec::new();
         let mut cursor: Option<String> = None;
+        let mut pages: usize = 0;
 
         loop {
+            pages += 1;
             let mut query_params = vec![
                 ("exclude_archived", "true".to_string()),
                 ("limit", "200".to_string()),
@@ -188,6 +198,13 @@ impl SlackChannel {
                 .map(ToOwned::to_owned);
 
             if cursor.is_none() {
+                break;
+            }
+            if pages >= MAX_PAGES {
+                tracing::warn!(
+                    pages = MAX_PAGES,
+                    "Slack: conversations.list reached page limit; channel list may be incomplete"
+                );
                 break;
             }
         }
@@ -318,11 +335,14 @@ impl SlackChannel {
     /// [`INACTIVITY_TIMEOUT`].
     fn reset_inactivity_timer(&self, thread_key: &str, channel: &str, thread_ts: &str) {
         // Abort previous timer for this thread, if any.
-        self.timers
+        if let Some(h) = self
+            .timers
             .lock()
             .expect("timers mutex poisoned")
             .remove(thread_key)
-            .map(|h| h.abort());
+        {
+            h.abort();
+        }
 
         let wake_sleep: Arc<WakeSleepEngine> = Arc::clone(&self.wake_sleep);
         let thread_key_owned = thread_key.to_string();
@@ -370,10 +390,16 @@ impl SlackChannel {
         })
         .abort_handle();
 
-        self.timers
-            .lock()
-            .expect("timers mutex poisoned")
-            .insert(thread_key.to_string(), handle);
+        let mut guard = self.timers.lock().expect("timers mutex poisoned");
+        if guard.len() >= MAX_ACTIVE_TIMERS {
+            tracing::warn!(
+                capacity = MAX_ACTIVE_TIMERS,
+                "Slack: inactivity timer capacity reached; aborting timer for {thread_key}"
+            );
+            handle.abort();
+        } else {
+            guard.insert(thread_key.to_string(), handle);
+        }
     }
 
     // ── Interactive flow helpers ──────────────────────────────────────
@@ -588,7 +614,8 @@ impl SlackChannel {
             return Ok(());
         }
 
-        let content = format!("[block_action:{action_id}] {value}");
+        let safe_value = value.replace(['[', ']'], "");
+        let content = format!("[block_action:{action_id}] {safe_value}");
         let id_suffix = thread_ts.as_deref().unwrap_or(&channel).to_string();
         let thread_key = format!("{channel}:{id_suffix}");
         let channel_msg = ChannelMessage {
@@ -854,7 +881,7 @@ impl SlackChannel {
                                 break;
                             }
 
-                            self.dispatch_envelope(envelope, bot_user_id, &scoped_channel, tx).await?;
+                            self.dispatch_envelope(envelope, bot_user_id, scoped_channel.as_deref(), tx).await?;
                         }
                         Some(Ok(WsMsg::Ping(d))) => {
                             last_recv = Instant::now();
@@ -887,7 +914,7 @@ impl SlackChannel {
         &self,
         envelope: SocketModeEnvelope,
         bot_user_id: &str,
-        scoped_channel: &Option<String>,
+        scoped_channel: Option<&str>,
         tx: &tokio::sync::mpsc::Sender<ChannelMessage>,
     ) -> anyhow::Result<()> {
         match envelope.envelope_type.as_str() {
@@ -899,8 +926,8 @@ impl SlackChannel {
                     };
 
                 // Filter by configured channel_id (parity with polling path)
-                if let Some(ref scoped) = scoped_channel {
-                    if channel != *scoped {
+                if let Some(scoped) = scoped_channel {
+                    if channel != scoped {
                         return Ok(());
                     }
                 }
@@ -963,13 +990,13 @@ impl SlackChannel {
                     .unwrap_or("");
                 match payload_type {
                     "block_actions" => {
-                        self.handle_block_action(&envelope.payload, scoped_channel.as_deref(), tx)
+                        self.handle_block_action(&envelope.payload, scoped_channel, tx)
                             .await?;
                     }
                     "view_submission" => {
                         self.handle_view_submission(
                             &envelope.payload,
-                            scoped_channel.as_deref(),
+                            scoped_channel,
                             tx,
                         )
                         .await?;
@@ -2115,7 +2142,7 @@ mod tests {
         let ch = wildcard_channel();
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
         let env = events_api_envelope("U123", "C456", "1234567890.000001", "hello");
-        ch.dispatch_envelope(env, "BBOT", &None, &tx).await.unwrap();
+        ch.dispatch_envelope(env, "BBOT", None, &tx).await.unwrap();
         let msg = rx.try_recv().expect("events_api message should be forwarded");
         assert_eq!(msg.sender, "U123");
         assert_eq!(msg.content, "hello");
@@ -2130,7 +2157,7 @@ mod tests {
         let ch = wildcard_channel();
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
         let env = events_api_envelope("U123", "C456", "1234567890.000001", "hello");
-        ch.dispatch_envelope(env, "BBOT", &Some("C789".to_string()), &tx)
+        ch.dispatch_envelope(env, "BBOT", Some("C789"), &tx)
             .await
             .unwrap();
         assert!(
@@ -2144,7 +2171,7 @@ mod tests {
         let ch = SlackChannel::new("xoxb-fake".into(), None, None, vec!["U999".into()]);
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
         let env = events_api_envelope("U123", "C456", "1234567890.000001", "hello");
-        ch.dispatch_envelope(env, "BBOT", &None, &tx).await.unwrap();
+        ch.dispatch_envelope(env, "BBOT", None, &tx).await.unwrap();
         assert!(
             rx.try_recv().is_err(),
             "message from unauthorized user should be discarded"
@@ -2166,7 +2193,7 @@ mod tests {
                 "trigger_id": "TRG1"
             }),
         };
-        ch.dispatch_envelope(env, "BBOT", &None, &tx).await.unwrap();
+        ch.dispatch_envelope(env, "BBOT", None, &tx).await.unwrap();
         let msg = rx.try_recv().expect("block_action confirm should be forwarded");
         assert!(msg.content.contains("confirm_issue"));
     }
@@ -2180,7 +2207,7 @@ mod tests {
             envelope_type: "slash_commands".to_string(),
             payload: serde_json::json!({"command": "/pm", "text": "help"}),
         };
-        ch.dispatch_envelope(env, "BBOT", &None, &tx).await.unwrap();
+        ch.dispatch_envelope(env, "BBOT", None, &tx).await.unwrap();
         assert!(
             rx.try_recv().is_err(),
             "slash commands should be discarded without forwarding"
@@ -2196,7 +2223,7 @@ mod tests {
             envelope_type: "mystery_envelope".to_string(),
             payload: serde_json::json!({}),
         };
-        ch.dispatch_envelope(env, "BBOT", &None, &tx).await.unwrap();
+        ch.dispatch_envelope(env, "BBOT", None, &tx).await.unwrap();
         assert!(
             rx.try_recv().is_err(),
             "unknown envelope type should be silently discarded"

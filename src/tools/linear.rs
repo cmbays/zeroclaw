@@ -58,15 +58,18 @@ impl LinearTool {
             .context("Failed to parse Linear GraphQL response")?;
 
         if let Some(errors) = json.get("errors") {
-            let count = errors.as_array().map(|a| a.len()).unwrap_or(0);
-            tracing::warn!(
-                error_count = count,
-                "Linear GraphQL request returned errors"
-            );
-            anyhow::bail!("Linear API request failed — see server logs");
+            let first_msg = errors
+                .as_array()
+                .and_then(|a| a.first())
+                .and_then(|e| e.get("message"))
+                .and_then(|m| m.as_str())
+                .unwrap_or("unknown error");
+            anyhow::bail!("Linear API error: {first_msg}");
         }
 
-        Ok(json["data"].clone())
+        json.get("data")
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Linear API response missing 'data' field"))
     }
 
     async fn create_issue(&self, args: &Value) -> anyhow::Result<ToolResult> {

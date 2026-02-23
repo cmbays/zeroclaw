@@ -12,6 +12,10 @@ use std::time::Instant;
 /// Inactivity timeout before a thread transitions to sleeping.
 pub const INACTIVITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3600);
 
+/// Hard cap on tracked threads. New threads beyond this limit are treated as
+/// awake but not inserted, preventing unbounded allocations.
+const MAX_ENTRIES: usize = 10_000;
+
 /// Decision returned by [`WakeSleepEngine::on_event`].
 #[derive(Debug, PartialEq, Eq)]
 pub enum EventDecision {
@@ -53,7 +57,23 @@ impl WakeSleepEngine {
         let mut states = self.states.lock().expect("wake_sleep mutex poisoned");
 
         match states.get(thread_key) {
-            None | Some(WakeState::Awake { .. }) => {
+            None => {
+                if states.len() >= MAX_ENTRIES {
+                    tracing::warn!(
+                        capacity = MAX_ENTRIES,
+                        "WakeSleepEngine: at capacity; treating new thread as awake without tracking"
+                    );
+                    return EventDecision::Forward;
+                }
+                states.insert(
+                    thread_key.to_string(),
+                    WakeState::Awake {
+                        last_activity: Instant::now(),
+                    },
+                );
+                EventDecision::Forward
+            }
+            Some(WakeState::Awake { .. }) => {
                 states.insert(
                     thread_key.to_string(),
                     WakeState::Awake {
