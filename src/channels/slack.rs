@@ -268,9 +268,26 @@ impl SlackChannel {
         Ok(())
     }
 
-    /// Parse a Socket Mode JSON envelope.
+    /// Parse a Socket Mode JSON envelope from a string.
+    ///
+    /// Production code uses `serde_json::from_value` on an already-parsed `Value`
+    /// to avoid double-parsing. This function is kept for tests.
+    #[cfg(test)]
     fn parse_envelope(text: &str) -> anyhow::Result<SocketModeEnvelope> {
         serde_json::from_str(text).map_err(|e| anyhow::anyhow!("Slack: envelope parse error: {e}"))
+    }
+
+    /// Format a Slack message ID from channel and timestamp.
+    fn message_id(channel_id: &str, ts: &str) -> String {
+        format!("slack_{channel_id}_{ts}")
+    }
+
+    /// Current Unix timestamp in whole seconds.
+    fn unix_timestamp() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
     }
 
     /// Extract message fields from an `events_api` payload.
@@ -624,10 +641,7 @@ impl SlackChannel {
             reply_target: channel.clone(),
             content,
             channel: "slack".to_string(),
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
+            timestamp: Self::unix_timestamp(),
             thread_ts,
         };
 
@@ -767,10 +781,7 @@ impl SlackChannel {
             reply_target: channel.clone(),
             content,
             channel: "slack".to_string(),
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
+            timestamp: Self::unix_timestamp(),
             thread_ts,
         };
 
@@ -866,10 +877,11 @@ impl SlackChannel {
                                 _ => {}
                             }
 
-                            let envelope = match Self::parse_envelope(&text) {
+                            // Deserialize from the already-parsed Value (avoids re-parsing the string).
+                            let envelope = match serde_json::from_value::<SocketModeEnvelope>(raw) {
                                 Ok(e) => e,
                                 Err(e) => {
-                                    tracing::warn!("Slack: {e}");
+                                    tracing::warn!("Slack: envelope parse error: {e}");
                                     continue;
                                 }
                             };
@@ -963,7 +975,7 @@ impl SlackChannel {
                 let timer_ts = thread_ts.as_deref().unwrap_or(&ts).to_string();
 
                 let channel_msg = ChannelMessage {
-                    id: format!("slack_{channel}_{ts}"),
+                    id: Self::message_id(&channel, &ts),
                     sender: user,
                     reply_target: channel.clone(),
                     content: text,
@@ -1144,7 +1156,7 @@ impl SlackChannel {
                         last_ts_by_channel.insert(channel_id.clone(), ts.to_string());
 
                         let channel_msg = ChannelMessage {
-                            id: format!("slack_{channel_id}_{ts}"),
+                            id: Self::message_id(&channel_id, ts),
                             sender: user.to_string(),
                             reply_target: channel_id.clone(),
                             content: text.to_string(),
@@ -1207,6 +1219,13 @@ impl Channel for SlackChannel {
     }
 
     async fn listen(&self, tx: tokio::sync::mpsc::Sender<ChannelMessage>) -> anyhow::Result<()> {
+        if self.allowed_users.is_empty() {
+            tracing::warn!(
+                "Slack: allowed_users is empty — all messages will be silently ignored. \
+                 Add user IDs to [channels.slack].allowed_users or use [\"*\"] to allow everyone."
+            );
+        }
+
         if self.app_token.is_some() {
             // Socket Mode: reconnect with exponential backoff
             let mut backoff = Duration::from_secs(1);
@@ -1387,42 +1406,34 @@ mod tests {
 
     #[test]
     fn slack_message_id_format_includes_channel_and_ts() {
-        let ts = "1234567890.123456";
-        let channel_id = "C12345";
-        let expected_id = format!("slack_{channel_id}_{ts}");
-        assert_eq!(expected_id, "slack_C12345_1234567890.123456");
+        let id = SlackChannel::message_id("C12345", "1234567890.123456");
+        assert_eq!(id, "slack_C12345_1234567890.123456");
     }
 
     #[test]
     fn slack_message_id_is_deterministic() {
-        let ts = "1234567890.123456";
-        let channel_id = "C12345";
-        let id1 = format!("slack_{channel_id}_{ts}");
-        let id2 = format!("slack_{channel_id}_{ts}");
+        let id1 = SlackChannel::message_id("C12345", "1234567890.123456");
+        let id2 = SlackChannel::message_id("C12345", "1234567890.123456");
         assert_eq!(id1, id2);
     }
 
     #[test]
     fn slack_message_id_different_ts_different_id() {
-        let channel_id = "C12345";
-        let id1 = format!("slack_{channel_id}_1234567890.123456");
-        let id2 = format!("slack_{channel_id}_1234567890.123457");
+        let id1 = SlackChannel::message_id("C12345", "1234567890.123456");
+        let id2 = SlackChannel::message_id("C12345", "1234567890.123457");
         assert_ne!(id1, id2);
     }
 
     #[test]
     fn slack_message_id_different_channel_different_id() {
-        let ts = "1234567890.123456";
-        let id1 = format!("slack_C12345_{ts}");
-        let id2 = format!("slack_C67890_{ts}");
+        let id1 = SlackChannel::message_id("C12345", "1234567890.123456");
+        let id2 = SlackChannel::message_id("C67890", "1234567890.123456");
         assert_ne!(id1, id2);
     }
 
     #[test]
     fn slack_message_id_no_uuid_randomness() {
-        let ts = "1234567890.123456";
-        let channel_id = "C12345";
-        let id = format!("slack_{channel_id}_{ts}");
+        let id = SlackChannel::message_id("C12345", "1234567890.123456");
         assert!(!id.contains('-'));
         assert!(id.starts_with("slack_"));
     }

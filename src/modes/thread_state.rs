@@ -36,6 +36,7 @@ impl ThreadModeState {
         map.insert(thread_ts.to_string(), mode_name);
     }
 
+    #[cfg(test)]
     pub fn clear_mode(&self, thread_ts: &str) {
         self.active_modes.write().remove(thread_ts);
     }

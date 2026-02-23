@@ -4,6 +4,7 @@
 //! bidirectional links between Slack channels and Linear projects.
 
 use anyhow::{bail, Result};
+use std::sync::LazyLock;
 
 // ── Slug helpers ──────────────────────────────────────────────────────────────
 
@@ -37,11 +38,17 @@ pub fn project_name_to_slack_slug(name: &str) -> anyhow::Result<String> {
 
 // ── Channel lifecycle ─────────────────────────────────────────────────────────
 
-fn build_http_client() -> reqwest::Client {
+/// Shared HTTP client. `reqwest::Client` is cheaply cloneable (reference-counted
+/// internally), so all callers share a single connection pool.
+static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .expect("reqwest Client::builder should not fail with basic timeout")
+});
+
+fn build_http_client() -> reqwest::Client {
+    HTTP_CLIENT.clone()
 }
 
 /// Create a `#prj-<slug>` Slack channel for a new Linear project.

@@ -107,6 +107,7 @@ impl WakeSleepEngine {
     }
 
     /// Return whether a thread is currently awake.
+    #[cfg(test)]
     pub fn is_awake(&self, thread_key: &str) -> bool {
         let states = self.states.lock().expect("wake_sleep mutex poisoned");
         matches!(states.get(thread_key), Some(WakeState::Awake { .. }))

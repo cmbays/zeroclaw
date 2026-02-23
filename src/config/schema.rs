@@ -324,6 +324,12 @@ pub struct LinearConfig {
     /// `X-Hub-Signature-256` header. Optional; omit to accept all GitHub requests.
     #[serde(default)]
     pub github_webhook_signing_secret: Option<String>,
+    /// Bind address for the webhook HTTP listener. Default: `"0.0.0.0"` (all interfaces).
+    ///
+    /// Override to `"127.0.0.1"` for local development without a reverse proxy.
+    /// In Docker Compose the default `"0.0.0.0"` is appropriate.
+    #[serde(default)]
+    pub webhook_bind: Option<String>,
 }
 
 // ── Hardware Config (wizard-driven) ─────────────────────────────

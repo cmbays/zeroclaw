@@ -168,7 +168,7 @@ fn dispatch_github_event(payload: &serde_json::Value) {
 
     tracing::debug!("github webhook: action={action} merged={merged}");
 
-    // PR merged → log for future lifecycle hooks (stub for now).
+    // PR merged → W8 will post a merge notification to the project Slack channel.
     if action == "closed" && merged {
         let pr_title = payload
             .pointer("/pull_request/title")
@@ -221,7 +221,12 @@ pub async fn run(config: &Config) -> Result<()> {
         .layer(DefaultBodyLimit::max(65_536)) // 64 KB — matches gateway MAX_BODY_SIZE
         .with_state(state);
 
-    let addr = format!("0.0.0.0:{port}");
+    let bind = config
+        .linear
+        .webhook_bind
+        .as_deref()
+        .unwrap_or("0.0.0.0");
+    let addr = format!("{bind}:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("webhook: listening on {addr}");
 
