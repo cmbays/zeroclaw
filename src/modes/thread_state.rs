@@ -31,6 +31,7 @@ impl ThreadModeState {
         self.active_modes.write().remove(thread_ts);
     }
 
+    #[cfg(test)]
     pub fn active_count(&self) -> usize {
         self.active_modes.read().len()
     }

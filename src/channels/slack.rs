@@ -2121,6 +2121,8 @@ mod tests {
         assert_eq!(msg.content, "hello");
         assert_eq!(msg.reply_target, "C456");
         assert_eq!(msg.channel, "slack");
+        // thread_ts missing from event — falls back to ts
+        assert_eq!(msg.thread_ts, Some("1234567890.000001".to_string()));
     }
 
     #[tokio::test]
