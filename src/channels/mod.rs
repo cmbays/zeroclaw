@@ -6722,4 +6722,222 @@ This is an example JSON object for profile settings."#;
             "failed vision turn must not persist image marker content"
         );
     }
+
+    // ── Mode layer helpers ────────────────────────────────────────
+
+    fn make_registry_with_pm_mode(ws: &std::path::Path) -> Arc<crate::modes::ModeRegistry> {
+        let mut config = crate::config::Config::default();
+        config.workspace_dir = ws.to_path_buf();
+        config.modes.insert(
+            "pm".to_string(),
+            crate::config::ModeConfig {
+                identity_format: "openclaw".to_string(),
+                aieos_path: None,
+                skills_dir: None,
+                visual_identity: None,
+                response_policy: None,
+            },
+        );
+        Arc::new(
+            crate::modes::ModeRegistry::from_config(
+                &config,
+                &[],
+                &[],
+                None,
+                true,
+                crate::config::SkillsPromptInjectionMode::Full,
+                "",
+            )
+            .unwrap(),
+        )
+    }
+
+    fn make_mode_ctx(
+        mode_registry: Option<Arc<crate::modes::ModeRegistry>>,
+        thread_mode_state: Arc<crate::modes::thread_state::ThreadModeState>,
+    ) -> ChannelRuntimeContext {
+        ChannelRuntimeContext {
+            channels_by_name: Arc::new(HashMap::new()),
+            provider: Arc::new(DummyProvider),
+            default_provider: Arc::new("test".to_string()),
+            memory: Arc::new(NoopMemory),
+            tools_registry: Arc::new(vec![]),
+            observer: Arc::new(NoopObserver),
+            system_prompt: Arc::new("system".to_string()),
+            model: Arc::new("test-model".to_string()),
+            temperature: 0.0,
+            auto_save_memory: false,
+            max_tool_iterations: 5,
+            min_relevance_score: 0.0,
+            conversation_histories: Arc::new(Mutex::new(HashMap::new())),
+            provider_cache: Arc::new(Mutex::new(HashMap::new())),
+            route_overrides: Arc::new(Mutex::new(HashMap::new())),
+            api_key: None,
+            api_url: None,
+            reliability: Arc::new(crate::config::ReliabilityConfig::default()),
+            interrupt_on_new_message: false,
+            multimodal: crate::config::MultimodalConfig::default(),
+            hooks: None,
+            provider_runtime_options: providers::ProviderRuntimeOptions::default(),
+            workspace_dir: Arc::new(std::env::temp_dir()),
+            message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
+            non_cli_excluded_tools: Arc::new(Vec::new()),
+            mode_registry,
+            thread_mode_state,
+        }
+    }
+
+    fn make_channel_msg(content: &str, thread_ts: Option<&str>) -> traits::ChannelMessage {
+        traits::ChannelMessage {
+            id: "test-id".to_string(),
+            sender: "U123".to_string(),
+            reply_target: "C456".to_string(),
+            content: content.to_string(),
+            channel: "slack".to_string(),
+            timestamp: 0,
+            thread_ts: thread_ts.map(|s| s.to_string()),
+        }
+    }
+
+    // ── C-3: resolve_thread_mode ──────────────────────────────────
+
+    #[test]
+    fn resolve_thread_mode_no_registry_returns_none() {
+        let state = Arc::new(crate::modes::thread_state::ThreadModeState::new());
+        let ctx = make_mode_ctx(None, state);
+        let msg = make_channel_msg("<@UBOT> pm", None);
+        assert_eq!(resolve_thread_mode(&ctx, &msg), None);
+    }
+
+    #[test]
+    fn resolve_thread_mode_valid_mode_no_thread_ts_returns_without_persisting() {
+        let ws = make_workspace();
+        let registry = make_registry_with_pm_mode(ws.path());
+        let state = Arc::new(crate::modes::thread_state::ThreadModeState::new());
+        let ctx = make_mode_ctx(Some(registry), Arc::clone(&state));
+        let msg = make_channel_msg("<@UBOT> pm", None);
+        // Returns the mode but does not store it (no thread_ts to key on)
+        assert_eq!(resolve_thread_mode(&ctx, &msg), Some("pm".to_string()));
+        assert_eq!(state.active_count(), 0, "should not persist without thread_ts");
+    }
+
+    #[test]
+    fn resolve_thread_mode_valid_mode_with_thread_ts_persists() {
+        let ws = make_workspace();
+        let registry = make_registry_with_pm_mode(ws.path());
+        let state = Arc::new(crate::modes::thread_state::ThreadModeState::new());
+        let ctx = make_mode_ctx(Some(registry), Arc::clone(&state));
+        let msg = make_channel_msg("<@UBOT> pm", Some("ts1"));
+        assert_eq!(resolve_thread_mode(&ctx, &msg), Some("pm".to_string()));
+        assert_eq!(state.get_mode("ts1"), Some("pm".to_string()));
+    }
+
+    #[test]
+    fn resolve_thread_mode_unknown_mode_name_returns_none() {
+        let ws = make_workspace();
+        let registry = make_registry_with_pm_mode(ws.path());
+        let state = Arc::new(crate::modes::thread_state::ThreadModeState::new());
+        let ctx = make_mode_ctx(Some(registry), state);
+        let msg = make_channel_msg("<@UBOT> notamode", Some("ts1"));
+        assert_eq!(resolve_thread_mode(&ctx, &msg), None);
+    }
+
+    #[test]
+    fn resolve_thread_mode_uses_persisted_mode_for_thread() {
+        let ws = make_workspace();
+        let registry = make_registry_with_pm_mode(ws.path());
+        let state = Arc::new(crate::modes::thread_state::ThreadModeState::new());
+        state.set_mode("ts1", "pm".to_string());
+        let ctx = make_mode_ctx(Some(registry), state);
+        // Plain message in a thread that already has "pm" active
+        let msg = make_channel_msg("create an issue", Some("ts1"));
+        assert_eq!(resolve_thread_mode(&ctx, &msg), Some("pm".to_string()));
+    }
+
+    // ── C-3: apply_mode_identity ──────────────────────────────────
+
+    #[test]
+    fn apply_mode_identity_none_vi_returns_message_unchanged() {
+        let msg = traits::SendMessage::new("hello", "C123");
+        let result = apply_mode_identity(msg, &None);
+        assert_eq!(result.username, None);
+        assert_eq!(result.icon_emoji, None);
+        assert_eq!(result.content, "hello");
+    }
+
+    #[test]
+    fn apply_mode_identity_some_vi_sets_username_and_emoji() {
+        let vi = Some(crate::config::VisualIdentityConfig {
+            username: Some("PM Bot".to_string()),
+            icon_emoji: Some(":clipboard:".to_string()),
+        });
+        let msg = traits::SendMessage::new("hello", "C123");
+        let result = apply_mode_identity(msg, &vi);
+        assert_eq!(result.username, Some("PM Bot".to_string()));
+        assert_eq!(result.icon_emoji, Some(":clipboard:".to_string()));
+    }
+
+    #[test]
+    fn apply_mode_identity_vi_with_none_fields_passes_nones() {
+        let vi = Some(crate::config::VisualIdentityConfig {
+            username: None,
+            icon_emoji: None,
+        });
+        let msg = traits::SendMessage::new("hello", "C123");
+        let result = apply_mode_identity(msg, &vi);
+        assert_eq!(result.username, None);
+        assert_eq!(result.icon_emoji, None);
+    }
+
+    // ── C-3: user_facing_llm_error ───────────────────────────────
+
+    #[test]
+    fn user_facing_llm_error_ollama_not_running() {
+        let err = anyhow::anyhow!("connection refused: Is Ollama running? Try: ollama serve");
+        let msg = user_facing_llm_error(&err);
+        assert!(
+            msg.contains("can't reach the reasoning engine"),
+            "should hint at Ollama being down: {msg}"
+        );
+    }
+
+    #[test]
+    fn user_facing_llm_error_ollama_serve_phrase() {
+        let err = anyhow::anyhow!("failed to connect: ollama serve is not running");
+        let msg = user_facing_llm_error(&err);
+        assert!(
+            msg.contains("can't reach the reasoning engine"),
+            "ollama serve phrase should match: {msg}"
+        );
+    }
+
+    #[test]
+    fn user_facing_llm_error_model_not_found() {
+        let err = anyhow::anyhow!("model 'qwen3:14b' not found, try pulling it first");
+        let msg = user_facing_llm_error(&err);
+        assert!(
+            msg.contains("AI model isn't loaded yet"),
+            "should hint to pull the model: {msg}"
+        );
+    }
+
+    #[test]
+    fn user_facing_llm_error_pull_it_first_phrase() {
+        let err = anyhow::anyhow!("you must pull it first before using");
+        let msg = user_facing_llm_error(&err);
+        assert!(
+            msg.contains("AI model isn't loaded yet"),
+            "pull it first phrase should match: {msg}"
+        );
+    }
+
+    #[test]
+    fn user_facing_llm_error_generic_fallback() {
+        let err = anyhow::anyhow!("unexpected provider timeout");
+        let msg = user_facing_llm_error(&err);
+        assert!(
+            msg.starts_with("⚠️ Error:"),
+            "generic error should use fallback format: {msg}"
+        );
+    }
 }

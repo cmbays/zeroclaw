@@ -2091,4 +2091,113 @@ mod tests {
             "unauthorized user should be skipped"
         );
     }
+
+    // ── M-7: dispatch_envelope ────────────────────────────────────
+
+    fn events_api_envelope(user: &str, channel: &str, ts: &str, text: &str) -> SocketModeEnvelope {
+        SocketModeEnvelope {
+            envelope_id: "env-1".to_string(),
+            envelope_type: "events_api".to_string(),
+            payload: serde_json::json!({
+                "event": {
+                    "type": "message",
+                    "user": user,
+                    "text": text,
+                    "channel": channel,
+                    "ts": ts
+                }
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_envelope_events_api_forwards_message() {
+        let ch = wildcard_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let env = events_api_envelope("U123", "C456", "1234567890.000001", "hello");
+        ch.dispatch_envelope(env, "BBOT", &None, &tx).await.unwrap();
+        let msg = rx.try_recv().expect("events_api message should be forwarded");
+        assert_eq!(msg.sender, "U123");
+        assert_eq!(msg.content, "hello");
+        assert_eq!(msg.reply_target, "C456");
+        assert_eq!(msg.channel, "slack");
+    }
+
+    #[tokio::test]
+    async fn dispatch_envelope_events_api_scoped_channel_mismatch_discarded() {
+        let ch = wildcard_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let env = events_api_envelope("U123", "C456", "1234567890.000001", "hello");
+        ch.dispatch_envelope(env, "BBOT", &Some("C789".to_string()), &tx)
+            .await
+            .unwrap();
+        assert!(
+            rx.try_recv().is_err(),
+            "message to wrong scoped channel should be discarded"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_envelope_events_api_unauthorized_user_discarded() {
+        let ch = SlackChannel::new("xoxb-fake".into(), None, None, vec!["U999".into()]);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let env = events_api_envelope("U123", "C456", "1234567890.000001", "hello");
+        ch.dispatch_envelope(env, "BBOT", &None, &tx).await.unwrap();
+        assert!(
+            rx.try_recv().is_err(),
+            "message from unauthorized user should be discarded"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_envelope_interactive_block_action_forwarded() {
+        let ch = wildcard_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let env = SocketModeEnvelope {
+            envelope_id: "env-2".to_string(),
+            envelope_type: "interactive".to_string(),
+            payload: serde_json::json!({
+                "type": "block_actions",
+                "user": {"id": "U123"},
+                "channel": {"id": "C456"},
+                "actions": [{"action_id": "confirm_issue", "value": "Auth Bug"}],
+                "trigger_id": "TRG1"
+            }),
+        };
+        ch.dispatch_envelope(env, "BBOT", &None, &tx).await.unwrap();
+        let msg = rx.try_recv().expect("block_action confirm should be forwarded");
+        assert!(msg.content.contains("confirm_issue"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_envelope_slash_commands_discarded() {
+        let ch = wildcard_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let env = SocketModeEnvelope {
+            envelope_id: "env-3".to_string(),
+            envelope_type: "slash_commands".to_string(),
+            payload: serde_json::json!({"command": "/pm", "text": "help"}),
+        };
+        ch.dispatch_envelope(env, "BBOT", &None, &tx).await.unwrap();
+        assert!(
+            rx.try_recv().is_err(),
+            "slash commands should be discarded without forwarding"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_envelope_unknown_type_discarded() {
+        let ch = wildcard_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let env = SocketModeEnvelope {
+            envelope_id: "env-4".to_string(),
+            envelope_type: "mystery_envelope".to_string(),
+            payload: serde_json::json!({}),
+        };
+        ch.dispatch_envelope(env, "BBOT", &None, &tx).await.unwrap();
+        assert!(
+            rx.try_recv().is_err(),
+            "unknown envelope type should be silently discarded"
+        );
+    }
 }

@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use crate::config::{IdentityConfig, VisualIdentityConfig};
 
 /// A fully resolved mode ready for use at runtime.
+#[derive(Debug)]
 pub struct ModeDefinition {
     /// Pre-built system prompt (includes AIEOS persona + response policy).
     pub system_prompt: String,
@@ -13,6 +14,7 @@ pub struct ModeDefinition {
 }
 
 /// Registry of configured modes, built once at startup.
+#[derive(Debug)]
 pub struct ModeRegistry {
     modes: HashMap<String, ModeDefinition>,
 }
@@ -267,5 +269,121 @@ mod tests {
         assert!(registry.mode_names().is_empty());
         assert!(!registry.has_mode("pm"));
         assert!(registry.get_mode("pm").is_none());
+    }
+
+    // ── M-6: ModeRegistry::from_config untested paths ────────────
+
+    fn write_workspace_files(dir: &std::path::Path) {
+        for name in &[
+            "SOUL.md", "IDENTITY.md", "USER.md", "AGENTS.md", "TOOLS.md", "HEARTBEAT.md",
+            "MEMORY.md",
+        ] {
+            std::fs::write(dir.join(name), "# Test").unwrap();
+        }
+    }
+
+    fn pm_mode_openclaw() -> crate::config::ModeConfig {
+        crate::config::ModeConfig {
+            identity_format: "openclaw".to_string(),
+            aieos_path: None,
+            skills_dir: None,
+            visual_identity: None,
+            response_policy: None,
+        }
+    }
+
+    fn build_registry(config: &crate::config::Config) -> anyhow::Result<ModeRegistry> {
+        ModeRegistry::from_config(
+            config,
+            &[],
+            &[],
+            None,
+            true,
+            crate::config::SkillsPromptInjectionMode::Full,
+            "",
+        )
+    }
+
+    #[test]
+    fn mode_registry_response_policy_appears_in_system_prompt() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_workspace_files(tmp.path());
+        let mut config = crate::config::Config::default();
+        config.workspace_dir = tmp.path().to_path_buf();
+        config.modes.insert(
+            "pm".to_string(),
+            crate::config::ModeConfig {
+                response_policy: Some("respond only when @mentioned".to_string()),
+                ..pm_mode_openclaw()
+            },
+        );
+        let registry = build_registry(&config).unwrap();
+        let mode = registry.get_mode("pm").expect("pm mode should exist");
+        assert!(
+            mode.system_prompt.contains("respond only when @mentioned"),
+            "response policy must appear in system_prompt"
+        );
+    }
+
+    #[test]
+    fn mode_registry_aieos_missing_file_returns_err() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut config = crate::config::Config::default();
+        config.workspace_dir = tmp.path().to_path_buf();
+        config.modes.insert(
+            "pm".to_string(),
+            crate::config::ModeConfig {
+                identity_format: "aieos".to_string(),
+                aieos_path: Some("nonexistent/identity.json".to_string()),
+                skills_dir: None,
+                visual_identity: None,
+                response_policy: None,
+            },
+        );
+        let result = build_registry(&config);
+        assert!(result.is_err(), "missing AIEOS file should cause an error");
+        assert!(
+            result.unwrap_err().to_string().contains("does not exist"),
+            "error message should mention missing file"
+        );
+    }
+
+    #[test]
+    fn mode_registry_aieos_path_with_wrong_format_warns_but_succeeds() {
+        // aieos_path is set but identity_format is "openclaw" — should warn, not fail
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_workspace_files(tmp.path());
+        let mut config = crate::config::Config::default();
+        config.workspace_dir = tmp.path().to_path_buf();
+        config.modes.insert(
+            "pm".to_string(),
+            crate::config::ModeConfig {
+                aieos_path: Some("some/path.json".to_string()),
+                ..pm_mode_openclaw()
+            },
+        );
+        assert!(
+            build_registry(&config).is_ok(),
+            "format/path mismatch should warn, not bail"
+        );
+    }
+
+    #[test]
+    fn mode_registry_missing_skills_dir_falls_back_to_base_skills() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_workspace_files(tmp.path());
+        let mut config = crate::config::Config::default();
+        config.workspace_dir = tmp.path().to_path_buf();
+        config.modes.insert(
+            "pm".to_string(),
+            crate::config::ModeConfig {
+                skills_dir: Some("nonexistent/skills".to_string()),
+                ..pm_mode_openclaw()
+            },
+        );
+        assert!(
+            build_registry(&config).is_ok(),
+            "missing skills_dir should warn, not fail"
+        );
     }
 }
