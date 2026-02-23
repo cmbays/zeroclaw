@@ -41,8 +41,10 @@ app_token = "xapp-REPLACE_ME"
 [linear]
 enabled = true
 
-# Personal API key — Linear → Settings → API → Personal API Keys.
-api_key = "lin_api_REPLACE_ME"
+# OAuth app token — Linear → Settings → API → OAuth Applications → your app → Developer token → App token.
+# Use an app token (not a user token) so actions are attributed to the integration, not your personal account.
+# Token expires after ~30 days; regenerate from the same page and update this value.
+api_key = "lin_oauth_REPLACE_ME"
 
 # Default team ID — visible in your Linear team URL:
 #   https://linear.app/<workspace>/team/<team-id>/...

@@ -1,19 +1,20 @@
 # ZeroClaw Fork — Docker Compose Stack
 #
-# Three services:
+# Two services:
 #   1. zeroclaw: The fork binary (built from source, dev target)
 #   2. ollama:   Local LLM server (Qwen 3 14B)
-#   3. tunnel:   Cloudflare Tunnel for Linear/GitHub webhooks
+#
+# Inbound webhook traffic (Linear/GitHub) is routed via Tailscale Funnel on the host.
+# Tailscale routes public HTTPS traffic → host port 8080 → zeroclaw container.
 #
 # Quick start:
-#   1. Create a Cloudflare tunnel first (Zero Trust → Networks → Tunnels → Add a tunnel).
-#      Configure a Public Hostname: webhooks.<your-domain> → http://zeroclaw-fork:8080
+#   1. Install Tailscale and enable Funnel (see README or docs/planning/):
+#        tailscale funnel --bg 8080
+#      Copy the public URL (https://<host>.<tailnet>.ts.net) for the Linear webhook.
 #   2. cp config/config.example.toml config/config.toml
 #      # fill in bot_token, app_token, linear.api_key, webhook_signing_secret, etc.
-#   3. cp .env.fork.example .env.fork
-#      # fill in CLOUDFLARE_TUNNEL_TOKEN
-#   4. docker compose -f docker-compose.fork.yml up -d
-#   5. docker compose -f docker-compose.fork.yml exec ollama ollama pull qwen3:14b
+#   3. docker compose -f docker-compose.fork.yml up -d
+#   4. docker compose -f docker-compose.fork.yml exec ollama ollama pull qwen3:14b
 
 services:
 
@@ -30,10 +31,6 @@ services:
     command: ["daemon"]
 
     # Slack/Linear secrets live in config/config.toml (bind-mounted below).
-    # Compose-level variables (CLOUDFLARE_TUNNEL_TOKEN) live in .env.fork.
-    env_file:
-      - .env.fork
-
     volumes:
       # Fork config (bind-mount): copy config/config.example.toml → config/config.toml
       # and fill in real secrets before starting.
@@ -44,11 +41,13 @@ services:
       # Bind-mounted after the named volume so it shadows the workspace/modes/ path.
       - ./modes:/zeroclaw-data/workspace/modes:ro
 
-    # Webhook port is internal-only; cloudflared routes external traffic to it.
-    # The gateway port is also internal-only (no public exposure needed for the fork).
+    # Port 8080 is bound to localhost only so Tailscale Funnel (running on the host)
+    # can route inbound webhook traffic to it. Not exposed to the wider network.
+    # Port 42617 (gateway) stays internal — used only for the Docker healthcheck.
     expose:
-      - "42617"  # ZeroClaw gateway (internal health check target)
-      - "8080"   # Linear/GitHub webhook listener
+      - "42617"  # ZeroClaw gateway (internal healthcheck target)
+    ports:
+      - "127.0.0.1:8080:8080"  # webhook listener — Tailscale Funnel → host:8080 → container
 
     depends_on:
       ollama:
@@ -92,28 +91,6 @@ services:
       resources:
         reservations:
           memory: 10G
-    networks:
-      - fork-net
-
-  # ── Cloudflare Tunnel ───────────────────────────────────────────────────────
-  #
-  # Routes inbound Linear/GitHub webhook traffic to zeroclaw-fork:8080.
-  # Tunnel token and public hostname routing are configured in the
-  # Cloudflare Zero Trust dashboard (Networks → Tunnels → your tunnel).
-  #
-  # Dashboard route to add:
-  #   Public Hostname:  webhooks.<your-domain>
-  #   Service:          http://zeroclaw-fork:8080
-  tunnel:
-    image: cloudflare/cloudflared:latest
-    container_name: zeroclaw-tunnel
-    restart: unless-stopped
-    command: tunnel --no-autoupdate run
-    environment:
-      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
-    depends_on:
-      zeroclaw:
-        condition: service_healthy
     networks:
       - fork-net
 
