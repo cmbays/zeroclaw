@@ -35,8 +35,11 @@ services:
 
     # Override Dockerfile ENV defaults so the config.toml values take effect.
     environment:
-      - ZEROCLAW_MODEL=qwen3:4b
+      - ZEROCLAW_MODEL=qwen3:0.6b
       - PROVIDER=ollama
+      # Disable qwen3's extended thinking mode — it adds 1-3 min of internal
+      # chain-of-thought reasoning before every response, making the bot unusably slow.
+      - ZEROCLAW_REASONING_ENABLED=false
 
     # Slack/Linear secrets live in config/config.toml (bind-mounted below).
     volumes:

@@ -312,9 +312,21 @@ impl SlackChannel {
         let event = payload.get("event")?;
         let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
-        // Only process message and app_mention events
-        if event_type != "message" && event_type != "app_mention" {
-            return None;
+        // Only process message and app_mention events.
+        // For channel messages, Slack sends BOTH a "message" event AND an "app_mention"
+        // event for the same @mention. To avoid processing (and responding) twice, skip
+        // "message" events in channels — those are covered by "app_mention".
+        // DM channels (ID starts with 'D') never generate "app_mention", so we keep
+        // "message" events there.
+        match event_type {
+            "app_mention" => {}
+            "message" => {
+                let channel_id = event.get("channel").and_then(|c| c.as_str()).unwrap_or("");
+                if !channel_id.starts_with('D') {
+                    return None; // channel message — handled via app_mention
+                }
+            }
+            _ => return None,
         }
 
         // Skip message subtypes (message_changed, message_deleted, bot_message, etc.)
@@ -1558,12 +1570,13 @@ mod tests {
 
     #[test]
     fn extract_event_message_normal() {
+        // DM channel (D-prefix) — message events are forwarded.
         let payload = serde_json::json!({
             "event": {
                 "type": "message",
                 "user": "U123",
                 "text": "hello world",
-                "channel": "C456",
+                "channel": "D456",
                 "ts": "1234567890.000001"
             }
         });
@@ -1572,19 +1585,20 @@ mod tests {
         let (user, text, channel, ts, thread_ts) = result.unwrap();
         assert_eq!(user, "U123");
         assert_eq!(text, "hello world");
-        assert_eq!(channel, "C456");
+        assert_eq!(channel, "D456");
         assert_eq!(ts, "1234567890.000001");
         assert_eq!(thread_ts.as_deref(), Some("1234567890.000001"));
     }
 
     #[test]
     fn extract_event_message_threaded_reply() {
+        // DM channel (D-prefix) threaded reply — thread_ts is preserved.
         let payload = serde_json::json!({
             "event": {
                 "type": "message",
                 "user": "U123",
                 "text": "reply in thread",
-                "channel": "C456",
+                "channel": "D456",
                 "ts": "1234567890.000010",
                 "thread_ts": "1234567890.000001"
             }
@@ -1669,6 +1683,45 @@ mod tests {
             }
         });
         assert!(SlackChannel::extract_event_message(&payload2, "BXXX").is_none());
+    }
+
+    #[test]
+    fn extract_event_message_channel_message_skipped_to_avoid_duplicate() {
+        // Slack sends BOTH "message" AND "app_mention" for an @mention in a channel.
+        // The "message" event in a channel (ID starts with C/G) must be skipped;
+        // the same content is handled by the "app_mention" event.
+        let payload = serde_json::json!({
+            "event": {
+                "type": "message",
+                "user": "U123",
+                "text": "<@BXXX> what's on the board?",
+                "channel": "C456",
+                "ts": "1234567890.000010"
+            }
+        });
+        assert!(
+            SlackChannel::extract_event_message(&payload, "BXXX").is_none(),
+            "message event in a channel should be skipped (handled by app_mention)"
+        );
+    }
+
+    #[test]
+    fn extract_event_message_dm_message_forwarded() {
+        // DM channels (ID starts with 'D') never generate app_mention,
+        // so "message" events there must be forwarded.
+        let payload = serde_json::json!({
+            "event": {
+                "type": "message",
+                "user": "U123",
+                "text": "hello",
+                "channel": "D789",
+                "ts": "1234567890.000011"
+            }
+        });
+        assert!(
+            SlackChannel::extract_event_message(&payload, "BXXX").is_some(),
+            "message event in a DM should be forwarded"
+        );
     }
 
     // ── Send body building (tests actual build_send_body) ─────────
@@ -2173,7 +2226,8 @@ mod tests {
             envelope_type: "events_api".to_string(),
             payload: serde_json::json!({
                 "event": {
-                    "type": "message",
+                    // Use app_mention so it routes correctly for channel events.
+                    "type": "app_mention",
                     "user": user,
                     "text": text,
                     "channel": channel,
@@ -2187,11 +2241,12 @@ mod tests {
     async fn dispatch_envelope_events_api_forwards_message() {
         let ch = wildcard_channel();
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        // Use app_mention in a channel — should be forwarded.
         let env = events_api_envelope("U123", "C456", "1234567890.000001", "hello");
         ch.dispatch_envelope(env, "BBOT", None, &tx).await.unwrap();
         let msg = rx
             .try_recv()
-            .expect("events_api message should be forwarded");
+            .expect("events_api app_mention should be forwarded");
         assert_eq!(msg.sender, "U123");
         assert_eq!(msg.content, "hello");
         assert_eq!(msg.reply_target, "C456");
