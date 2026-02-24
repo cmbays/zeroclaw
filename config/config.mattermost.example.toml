@@ -1,6 +1,6 @@
 # ZeroClaw — Mattermost Hub Configuration Template (single-process, 6 bots)
 #
-# All 6 ATLA bots run in a single ZeroClaw process.
+# All 6 bots run in a single ZeroClaw process.
 # Each [[channels_config.mattermost_bots]] entry spawns one MattermostChannel
 # instance with its own bot token. They share the Ollama provider and SQLite memory.
 #
@@ -39,82 +39,82 @@ sqlite_path = "~/.zeroclaw/mattermost-hub.db"
 cli = false
 
 # ═══════════════════════════════════════════════════════════════════
-# BOT: @sokka — PM (Linear, standups, backlog)
+# BOT: zeroclaw_pm — PM (Linear, standups, backlog)
 # Temperature: 0.1  |  mention_only: true
 # ═══════════════════════════════════════════════════════════════════
 [[channels_config.mattermost_bots]]
 url = "http://localhost:8065"
-# Token from: echo $MM_TOKEN_SOKKA
-bot_token = "REPLACE_WITH_MM_TOKEN_SOKKA"
+# Token from: echo $MM_TOKEN_PM
+bot_token = "REPLACE_WITH_MM_TOKEN_PM"
 allowed_users = ["*"]
 thread_replies = true
 mention_only = true
-mode = "sokka"
+mode = "zeroclaw_pm"
 
 # ═══════════════════════════════════════════════════════════════════
-# BOT: @toph — DevOps (shell, deployments, infra)
+# BOT: zeroclaw_devops — DevOps (shell, deployments, infra)
 # Temperature: 0.3  |  mention_only: true
 # ═══════════════════════════════════════════════════════════════════
 [[channels_config.mattermost_bots]]
 url = "http://localhost:8065"
-# Token from: echo $MM_TOKEN_TOPH
-bot_token = "REPLACE_WITH_MM_TOKEN_TOPH"
+# Token from: echo $MM_TOKEN_DEVOPS
+bot_token = "REPLACE_WITH_MM_TOKEN_DEVOPS"
 allowed_users = ["*"]
 thread_replies = true
 mention_only = true
-mode = "toph"
+mode = "zeroclaw_devops"
 
 # ═══════════════════════════════════════════════════════════════════
-# BOT: @azula — Security (code review, scanning, audit)
+# BOT: zeroclaw_security — Security (code review, scanning, audit)
 # Temperature: 0.1  |  mention_only: true
 # ═══════════════════════════════════════════════════════════════════
 [[channels_config.mattermost_bots]]
 url = "http://localhost:8065"
-# Token from: echo $MM_TOKEN_AZULA
-bot_token = "REPLACE_WITH_MM_TOKEN_AZULA"
+# Token from: echo $MM_TOKEN_SECURITY
+bot_token = "REPLACE_WITH_MM_TOKEN_SECURITY"
 allowed_users = ["*"]
 thread_replies = true
 mention_only = true
-mode = "azula"
+mode = "zeroclaw_security"
 
 # ═══════════════════════════════════════════════════════════════════
-# BOT: @iroh — Creative (ideation, architecture)
+# BOT: zeroclaw_creative — Creative (ideation, architecture)
 # Temperature: 0.8  |  mention_only: true
 # ═══════════════════════════════════════════════════════════════════
 [[channels_config.mattermost_bots]]
 url = "http://localhost:8065"
-# Token from: echo $MM_TOKEN_IROH
-bot_token = "REPLACE_WITH_MM_TOKEN_IROH"
+# Token from: echo $MM_TOKEN_CREATIVE
+bot_token = "REPLACE_WITH_MM_TOKEN_CREATIVE"
 allowed_users = ["*"]
 thread_replies = true
 mention_only = true
-mode = "iroh"
+mode = "zeroclaw_creative"
 
 # ═══════════════════════════════════════════════════════════════════
-# BOT: @katara — Dev (code, debugging, PR review)
+# BOT: zeroclaw_dev — Dev (code, debugging, PR review)
 # Temperature: 0.3  |  mention_only: true
 # ═══════════════════════════════════════════════════════════════════
 [[channels_config.mattermost_bots]]
 url = "http://localhost:8065"
-# Token from: echo $MM_TOKEN_KATARA
-bot_token = "REPLACE_WITH_MM_TOKEN_KATARA"
+# Token from: echo $MM_TOKEN_DEV
+bot_token = "REPLACE_WITH_MM_TOKEN_DEV"
 allowed_users = ["*"]
 thread_replies = true
 mention_only = true
-mode = "katara"
+mode = "zeroclaw_dev"
 
 # ═══════════════════════════════════════════════════════════════════
-# BOT: @aang — Coordinator (delegate, big picture)
+# BOT: zeroclaw_coordinator — Coordinator (delegate, big picture)
 # Temperature: 0.5  |  mention_only: true
 # ═══════════════════════════════════════════════════════════════════
 [[channels_config.mattermost_bots]]
 url = "http://localhost:8065"
-# Token from: echo $MM_TOKEN_AANG
-bot_token = "REPLACE_WITH_MM_TOKEN_AANG"
+# Token from: echo $MM_TOKEN_COORDINATOR
+bot_token = "REPLACE_WITH_MM_TOKEN_COORDINATOR"
 allowed_users = ["*"]
 thread_replies = true
 mention_only = true
-mode = "aang"
+mode = "zeroclaw_coordinator"
 
 # ═══════════════════════════════════════════════════════════════════
 # Per-mode brain definitions
@@ -129,44 +129,44 @@ mode = "aang"
 # See docs/planning/spike-mattermost-hub.md for the AIEOS schema.
 # ═══════════════════════════════════════════════════════════════════
 
-[modes.sokka]
-# Sokka: PM bot — Linear project management, standups, backlog grooming
+[modes.zeroclaw_pm]
+# PM bot — Linear project management, standups, backlog grooming
 identity_format = "aieos"
-aieos_path = "modes/sokka/identity.json"
+aieos_path = "modes/zeroclaw_pm/identity.json"
 tool_allowlist = ["linear", "memory_store", "memory_recall", "memory_forget", "ask_user"]
 temperature = 0.1
 
-[modes.toph]
-# Toph: DevOps bot — shell execution, file ops, HTTP requests, infra
+[modes.zeroclaw_devops]
+# DevOps bot — shell execution, file ops, HTTP requests, infra
 identity_format = "aieos"
-aieos_path = "modes/toph/identity.json"
+aieos_path = "modes/zeroclaw_devops/identity.json"
 tool_allowlist = ["shell", "file_read", "file_write", "file_edit", "glob", "http_request", "ask_user"]
 temperature = 0.3
 
-[modes.azula]
-# Azula: Security bot — code review, vulnerability scanning, audit
+[modes.zeroclaw_security]
+# Security bot — code review, vulnerability scanning, audit
 identity_format = "aieos"
-aieos_path = "modes/azula/identity.json"
+aieos_path = "modes/zeroclaw_security/identity.json"
 tool_allowlist = ["content_search", "file_read", "glob", "ask_user"]
 temperature = 0.1
 
-[modes.iroh]
-# Iroh: Creative bot — ideation, architecture, mentorship
+[modes.zeroclaw_creative]
+# Creative bot — ideation, architecture, mentorship
 identity_format = "aieos"
-aieos_path = "modes/iroh/identity.json"
+aieos_path = "modes/zeroclaw_creative/identity.json"
 tool_allowlist = ["memory_store", "memory_recall", "ask_user"]
 temperature = 0.8
 
-[modes.katara]
-# Katara: Dev bot — coding, debugging, PR review
+[modes.zeroclaw_dev]
+# Dev bot — coding, debugging, PR review
 identity_format = "aieos"
-aieos_path = "modes/katara/identity.json"
+aieos_path = "modes/zeroclaw_dev/identity.json"
 tool_allowlist = ["shell", "file_read", "file_write", "file_edit", "glob", "content_search", "ask_user"]
 temperature = 0.3
 
-[modes.aang]
-# Aang: Coordinator bot — delegation, big picture, cross-bot orchestration
+[modes.zeroclaw_coordinator]
+# Coordinator bot — delegation, big picture, cross-bot orchestration
 identity_format = "aieos"
-aieos_path = "modes/aang/identity.json"
+aieos_path = "modes/zeroclaw_coordinator/identity.json"
 tool_allowlist = ["delegate", "memory_store", "memory_recall", "ask_user"]
 temperature = 0.5

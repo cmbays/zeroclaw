@@ -3132,7 +3132,14 @@ pub async fn doctor_channels(config: Config) -> Result<()> {
         });
     }
 
-    if channels.is_empty() {
+    let mode_bot_count = config
+        .channels_config
+        .mattermost_bots
+        .iter()
+        .filter(|mm| mm.mode.is_some())
+        .count();
+
+    if channels.is_empty() && mode_bot_count == 0 {
         println!("No real-time channels configured. Run `zeroclaw onboard` first.");
         return Ok(());
     }
@@ -3171,12 +3178,6 @@ pub async fn doctor_channels(config: Config) -> Result<()> {
     if config.channels_config.webhook.is_some() {
         println!("  ℹ️  Webhook   check via `zeroclaw gateway` then GET /health");
     }
-    let mode_bot_count = config
-        .channels_config
-        .mattermost_bots
-        .iter()
-        .filter(|mm| mm.mode.is_some())
-        .count();
     if mode_bot_count > 0 {
         println!(
             "  ℹ️  {mode_bot_count} mode-linked Mattermost bot(s) are not checked here; \
@@ -6674,17 +6675,17 @@ This is an example JSON object for profile settings."#;
             // Mode-linked: excluded from shared pool (gets its own context in start_channels)
             crate::config::schema::MattermostConfig {
                 url: "http://localhost:8065".to_string(),
-                bot_token: "token-sokka".to_string(),
+                bot_token: "zeroclaw_bot_a".to_string(),
                 channel_id: None,
                 allowed_users: vec!["*".to_string()],
                 thread_replies: Some(true),
                 mention_only: Some(true),
-                mode: Some("sokka".to_string()),
+                mode: Some("zeroclaw_pm".to_string()),
             },
             // Non-mode-linked: included in shared pool
             crate::config::schema::MattermostConfig {
                 url: "http://localhost:8065".to_string(),
-                bot_token: "token-toph".to_string(),
+                bot_token: "zeroclaw_bot_b".to_string(),
                 channel_id: None,
                 allowed_users: vec!["*".to_string()],
                 thread_replies: Some(true),

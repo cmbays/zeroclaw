@@ -2800,10 +2800,25 @@ pub struct MattermostConfig {
     pub mention_only: Option<bool>,
     /// Mode name to link this bot to a `[modes.<name>]` entry.
     ///
+    /// **Default**: unset (`None`) — the bot joins the shared runtime context pool.
+    ///
     /// When set, the bot gets its own `ChannelRuntimeContext` with the mode's
     /// system prompt, tool allowlist, and temperature — independent of the
     /// shared runtime context used by other channels. Provider and Memory are
-    /// still shared (Arc cloning). If unset, the bot joins the shared pool.
+    /// still shared (Arc cloning). The bot will not appear in the shared
+    /// message bus; it is spawned with its own listener and dispatch loop.
+    ///
+    /// **Compatibility**: adding this key is backward-compatible; omitting it
+    /// or setting it to a different value preserves the shared-pool behavior.
+    /// Existing deployments that do not set `mode` continue operating unchanged.
+    ///
+    /// **Migration/rollback**: to revert a bot from per-mode to shared-pool,
+    /// remove the `mode` key (or set it to a different value) and restart.
+    /// The bot rejoins the shared pool and its per-mode conversation histories
+    /// are discarded (in-memory only — no persistent state is affected).
+    /// To roll back the entire feature, remove all `mode` fields from
+    /// `[[channels_config.mattermost_bots]]` entries and remove `[modes.*]`
+    /// sections; the runtime falls back to the original shared-context path.
     #[serde(default)]
     pub mode: Option<String>,
 }
