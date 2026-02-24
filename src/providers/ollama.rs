@@ -666,7 +666,11 @@ impl Provider for OllamaProvider {
                 })
                 .collect();
             let stripped = strip_inline_think_tags(response.message.content);
-            let text = if stripped.is_empty() { None } else { Some(stripped) };
+            let text = if stripped.is_empty() {
+                None
+            } else {
+                Some(stripped)
+            };
             return Ok(ChatResponse {
                 text,
                 tool_calls,
@@ -781,7 +785,10 @@ mod tests {
     #[test]
     fn strip_think_no_tags_passthrough() {
         let input = "plain answer with no think tags".to_string();
-        assert_eq!(strip_inline_think_tags(input), "plain answer with no think tags");
+        assert_eq!(
+            strip_inline_think_tags(input),
+            "plain answer with no think tags"
+        );
     }
 
     #[test]

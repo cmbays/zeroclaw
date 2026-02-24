@@ -144,6 +144,7 @@ pub async fn run_wizard(force: bool) -> Result<Config> {
         scheduler: crate::config::schema::SchedulerConfig::default(),
         agent: crate::config::schema::AgentConfig::default(),
         skills: crate::config::SkillsConfig::default(),
+        tool_allowlist: Vec::new(),
         model_routes: Vec::new(),
         embedding_routes: Vec::new(),
         heartbeat: HeartbeatConfig::default(),
@@ -494,6 +495,7 @@ async fn run_quick_setup_with_home(
         scheduler: crate::config::schema::SchedulerConfig::default(),
         agent: crate::config::schema::AgentConfig::default(),
         skills: crate::config::SkillsConfig::default(),
+        tool_allowlist: Vec::new(),
         model_routes: Vec::new(),
         embedding_routes: Vec::new(),
         heartbeat: HeartbeatConfig::default(),
@@ -1797,7 +1799,7 @@ fn resolve_interactive_onboarding_mode(
             "  Existing config found at {}. Select setup mode",
             config_path.display()
         ))
-        .items(&options)
+        .items(options)
         .default(1)
         .interact()?;
 
@@ -5608,7 +5610,7 @@ mod tests {
         apply_provider_update(
             &mut config,
             "anthropic".to_string(),
-            "".to_string(),
+            String::new(),
             "claude-sonnet-4-5-20250929".to_string(),
             None,
         );
