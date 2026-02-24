@@ -2798,6 +2798,14 @@ pub struct MattermostConfig {
     /// Other messages in the channel are silently ignored.
     #[serde(default)]
     pub mention_only: Option<bool>,
+    /// Mode name to link this bot to a `[modes.<name>]` entry.
+    ///
+    /// When set, the bot gets its own `ChannelRuntimeContext` with the mode's
+    /// system prompt, tool allowlist, and temperature — independent of the
+    /// shared runtime context used by other channels. Provider and Memory are
+    /// still shared (Arc cloning). If unset, the bot joins the shared pool.
+    #[serde(default)]
+    pub mode: Option<String>,
 }
 
 impl ChannelConfig for MattermostConfig {
