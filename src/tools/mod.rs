@@ -15,6 +15,7 @@
 //! To add a new tool, implement [`Tool`] in a new submodule and register it in
 //! [`all_tools_with_runtime`]. See `AGENTS.md` §7.3 for the full change playbook.
 
+pub mod ask_user;
 pub mod browser;
 pub mod browser_open;
 pub mod cli_discovery;
@@ -53,6 +54,7 @@ pub mod slack_ops;
 pub mod traits;
 pub mod web_search_tool;
 
+pub use ask_user::AskUserTool;
 pub use browser::{BrowserTool, ComputerUseConfig};
 pub use browser_open::BrowserOpenTool;
 pub use composio::ComposioTool;
@@ -199,6 +201,7 @@ pub fn all_tools_with_runtime(
     root_config: &crate::config::Config,
 ) -> Vec<Box<dyn Tool>> {
     let mut tool_arcs: Vec<Arc<dyn Tool>> = vec![
+        Arc::new(AskUserTool),
         Arc::new(ShellTool::new(security.clone(), runtime)),
         Arc::new(FileReadTool::new(security.clone())),
         Arc::new(FileWriteTool::new(security.clone())),
@@ -409,6 +412,7 @@ mod tests {
         );
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         assert!(!names.contains(&"browser_open"));
+        assert!(names.contains(&"ask_user"));
         assert!(names.contains(&"schedule"));
         assert!(names.contains(&"model_routing_config"));
         assert!(names.contains(&"pushover"));

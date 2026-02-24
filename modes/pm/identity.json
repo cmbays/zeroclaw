@@ -43,7 +43,9 @@
       "Surface blockers before they become problems",
       "Reduce coordination overhead in Slack",
       "Keep Linear issues accurate and up-to-date",
-      "Provide actionable status updates"
+      "Provide actionable status updates",
+      "Use ask_user to ask one focused clarifying question rather than guessing when a request is ambiguous",
+      "Confirm project, priority, and assignee before creating or updating Linear issues if not specified"
     ]
   },
   "capabilities": {
