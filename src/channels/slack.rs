@@ -315,15 +315,24 @@ impl SlackChannel {
         // Only process message and app_mention events.
         // For channel messages, Slack sends BOTH a "message" event AND an "app_mention"
         // event for the same @mention. To avoid processing (and responding) twice, skip
-        // "message" events in channels — those are covered by "app_mention".
-        // DM channels (ID starts with 'D') never generate "app_mention", so we keep
-        // "message" events there.
+        // "message" events in channels that would be duplicated by "app_mention":
+        //   - top-level channel messages (no thread_ts)
+        //   - thread replies that start with <@ (app_mention fires for those too)
+        // Thread follow-ups WITHOUT an @mention only fire "message", so we forward
+        // those to support conversation continuation within a thread.
+        // DM channels (ID starts with 'D') never generate "app_mention", so we always
+        // forward "message" events there.
         match event_type {
             "app_mention" => {}
             "message" => {
                 let channel_id = event.get("channel").and_then(|c| c.as_str()).unwrap_or("");
                 if !channel_id.starts_with('D') {
-                    return None; // channel message — handled via app_mention
+                    let thread_ts = event.get("thread_ts").and_then(|t| t.as_str());
+                    let text = event.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                    if thread_ts.is_none() || text.trim_start().starts_with("<@") {
+                        return None; // top-level or @mention thread reply — handled via app_mention
+                    }
+                    // thread reply without @mention — forward for conversation continuation
                 }
             }
             _ => return None,
@@ -1721,6 +1730,46 @@ mod tests {
         assert!(
             SlackChannel::extract_event_message(&payload, "BXXX").is_some(),
             "message event in a DM should be forwarded"
+        );
+    }
+
+    #[test]
+    fn extract_event_message_thread_reply_without_mention_forwarded() {
+        // Thread follow-up in a channel without @mention — should be forwarded so the
+        // bot can continue the conversation within the thread.
+        let payload = serde_json::json!({
+            "event": {
+                "type": "message",
+                "user": "U123",
+                "text": "list out the issues please",
+                "channel": "C456",
+                "ts": "1234567890.000020",
+                "thread_ts": "1234567890.000010"
+            }
+        });
+        assert!(
+            SlackChannel::extract_event_message(&payload, "BXXX").is_some(),
+            "thread reply without @mention should be forwarded for conversation continuation"
+        );
+    }
+
+    #[test]
+    fn extract_event_message_thread_reply_with_mention_skipped() {
+        // @mention inside a thread fires both "message" AND "app_mention".
+        // The "message" duplicate should be skipped; "app_mention" handles it.
+        let payload = serde_json::json!({
+            "event": {
+                "type": "message",
+                "user": "U123",
+                "text": "<@BXXX> list out the issues please",
+                "channel": "C456",
+                "ts": "1234567890.000030",
+                "thread_ts": "1234567890.000010"
+            }
+        });
+        assert!(
+            SlackChannel::extract_event_message(&payload, "BXXX").is_none(),
+            "message event for @mention thread reply should be skipped (app_mention handles it)"
         );
     }
 

@@ -16,8 +16,12 @@ config_path         = "/zeroclaw-data/.zeroclaw/config.toml"
 # Change to http://localhost:11434 for local runs outside Docker.
 api_url             = "http://host.docker.internal:11434"
 default_provider    = "ollama"
-default_model       = "qwen3:14b"
+default_model       = "llama3.2:3b"
 default_temperature = 0.7
+
+# Global tool ceiling — empty means all tools allowed to all modes.
+# Per-mode allowlists (under [modes.<name>]) override this per-message.
+tool_allowlist = []
 
 [gateway]
 port              = 42617
@@ -81,6 +85,13 @@ aieos_path = "modes/pm/identity.json"
 skills_dir = "modes/pm/skills"
 
 response_policy = "Respond only when directly @mentioned or when a user sends a DM. In all other cases, stay silent. Keep replies concise and action-oriented."
+
+# Tools available in PM mode. Small models (≤3B) reliably use tools when
+# given a focused set; 20+ tools causes fallback to text generation.
+# Add more modes below (e.g. [modes.dev]) with their own tool_allowlist.
+tool_allowlist = ["linear", "memory_store", "memory_recall", "memory_forget"]
+# Per-mode temperature override. Lower = less hallucination. Higher = more creative.
+# temperature = 0.1
 
 [modes.pm.visual_identity]
 username   = "ZeroClaw PM"

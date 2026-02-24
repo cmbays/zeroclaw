@@ -13,6 +13,39 @@ pub struct OllamaProvider {
     reasoning_enabled: Option<bool>,
 }
 
+/// Strip `<think>…</think>` blocks that some models (e.g. qwen3) embed inline
+/// in the content field even when thinking mode is nominally disabled.
+///
+/// Handles three forms:
+/// - Complete blocks: `<think>…</think>answer` → `answer`
+/// - Unclosed opening: `<think>…` → `` (drops to end)
+/// - Orphaned closing: `reasoning…</think>answer` → `answer`
+///   (qwen3 sometimes omits the opening tag when Ollama partially processes thinking)
+fn strip_inline_think_tags(mut s: String) -> String {
+    // Pass 1: remove complete and unclosed <think>…</think> blocks.
+    loop {
+        match s.find("<think>") {
+            None => break,
+            Some(start) => match s[start..].find("</think>") {
+                Some(rel_end) => {
+                    s.drain(start..start + rel_end + "</think>".len());
+                }
+                None => {
+                    // Unclosed tag — drop everything from here to end.
+                    s.truncate(start);
+                    break;
+                }
+            },
+        }
+    }
+    // Pass 2: strip orphaned </think> — everything before (and including) it is
+    // reasoning the model emitted without a matching opening tag.
+    if let Some(end) = s.find("</think>") {
+        s.drain(..end + "</think>".len());
+    }
+    s.trim().to_string()
+}
+
 // ─── Request Structures ───────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize)]
@@ -507,7 +540,7 @@ impl Provider for OllamaProvider {
         }
 
         // Plain text response
-        let content = response.message.content;
+        let content = strip_inline_think_tags(response.message.content);
 
         // Handle edge case: model returned only "thinking" with no content or tool calls
         if content.is_empty() {
@@ -557,7 +590,7 @@ impl Provider for OllamaProvider {
         }
 
         // Plain text response
-        let content = response.message.content;
+        let content = strip_inline_think_tags(response.message.content);
 
         // Handle edge case: model returned only "thinking" with no content or tool calls
         // This is a model quirk - it stopped after reasoning without producing output
@@ -632,11 +665,8 @@ impl Provider for OllamaProvider {
                     }
                 })
                 .collect();
-            let text = if response.message.content.is_empty() {
-                None
-            } else {
-                Some(response.message.content)
-            };
+            let stripped = strip_inline_think_tags(response.message.content);
+            let text = if stripped.is_empty() { None } else { Some(stripped) };
             return Ok(ChatResponse {
                 text,
                 tool_calls,
@@ -646,7 +676,7 @@ impl Provider for OllamaProvider {
         }
 
         // Plain text response.
-        let content = response.message.content;
+        let content = strip_inline_think_tags(response.message.content);
         if content.is_empty() {
             if let Some(thinking) = &response.message.thinking {
                 tracing::warn!(
@@ -726,6 +756,42 @@ impl Provider for OllamaProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── strip_inline_think_tags ───────────────────────────────────────────────
+
+    #[test]
+    fn strip_think_complete_block() {
+        let input = "<think>some reasoning</think>actual answer".to_string();
+        assert_eq!(strip_inline_think_tags(input), "actual answer");
+    }
+
+    #[test]
+    fn strip_think_orphaned_close_tag() {
+        // qwen3 sometimes omits the opening <think> but still emits </think>
+        let input = "reasoning without open tag</think>actual answer".to_string();
+        assert_eq!(strip_inline_think_tags(input), "actual answer");
+    }
+
+    #[test]
+    fn strip_think_unclosed_open_tag() {
+        let input = "<think>reasoning with no close".to_string();
+        assert_eq!(strip_inline_think_tags(input), "");
+    }
+
+    #[test]
+    fn strip_think_no_tags_passthrough() {
+        let input = "plain answer with no think tags".to_string();
+        assert_eq!(strip_inline_think_tags(input), "plain answer with no think tags");
+    }
+
+    #[test]
+    fn strip_think_multiple_blocks() {
+        // Text between two think blocks is preserved; only the tagged regions are removed.
+        let input = "<think>first</think>middle<think>second</think>final".to_string();
+        assert_eq!(strip_inline_think_tags(input), "middlefinal");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
 
     #[test]
     fn default_url() {
