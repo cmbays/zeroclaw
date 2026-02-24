@@ -1,0 +1,5 @@
+[skill]
+name = "sokka-dev"
+description = "Core dev mode skill for Sokka: shell execution, file operations, codebase search and debugging"
+version = "0.1.0"
+tags = ["dev", "sokka", "shell", "coding"]
