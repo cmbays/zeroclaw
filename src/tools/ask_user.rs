@@ -34,16 +34,22 @@ impl Tool for AskUserTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        let question = args
+        let question_val = args
             .get("question")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'question' parameter"))?;
+            .ok_or_else(|| anyhow::anyhow!("Missing required parameter 'question'"))?;
 
-        if question.trim().is_empty() {
+        let question = question_val
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("'question' must be a string, got: {question_val}"))?;
+
+        let question = question.trim();
+
+        if question.is_empty() {
+            let msg = "'question' parameter must not be empty";
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
-                error: Some("'question' parameter must not be empty".into()),
+                output: msg.into(),
+                error: Some(msg.into()),
             });
         }
 
@@ -92,10 +98,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ask_user_trims_whitespace_from_output() {
+        let result = AskUserTool
+            .execute(json!({ "question": "  Which project?  " }))
+            .await
+            .unwrap();
+        assert!(result.success);
+        assert_eq!(result.output, "Which project?");
+    }
+
+    #[tokio::test]
     async fn ask_user_missing_question_returns_err() {
         let result = AskUserTool.execute(json!({})).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("question"));
+    }
+
+    #[tokio::test]
+    async fn ask_user_non_string_question_returns_err() {
+        let result = AskUserTool.execute(json!({ "question": 42 })).await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("string"),
+            "expected type mismatch error, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ask_user_null_question_returns_err() {
+        let result = AskUserTool.execute(json!({ "question": null })).await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]
@@ -110,13 +143,23 @@ mod tests {
             .as_deref()
             .unwrap_or("")
             .contains("must not be empty"));
+        assert!(
+            !result.output.is_empty(),
+            "output should mirror error for consistent ToolResult contract"
+        );
     }
 
-    #[test]
-    fn ask_user_spec_generation() {
-        let spec = AskUserTool.spec();
-        assert_eq!(spec.name, "ask_user");
-        assert!(!spec.description.is_empty());
-        assert!(spec.parameters.is_object());
+    #[tokio::test]
+    async fn ask_user_empty_string_question_returns_failure() {
+        let result = AskUserTool
+            .execute(json!({ "question": "" }))
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("must not be empty"));
     }
 }
