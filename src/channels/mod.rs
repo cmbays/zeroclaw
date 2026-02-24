@@ -2887,6 +2887,11 @@ fn collect_configured_channels(
     }
 
     for mm in &config.channels_config.mattermost_bots {
+        if mm.mode.is_some() {
+            // Mode-linked bots get their own ChannelRuntimeContext spawned in
+            // start_channels; they are excluded from the shared message bus here.
+            continue;
+        }
         channels.push(ConfiguredChannel {
             display_name: "Mattermost",
             channel: Arc::new(MattermostChannel::new(
@@ -3127,7 +3132,14 @@ pub async fn doctor_channels(config: Config) -> Result<()> {
         });
     }
 
-    if channels.is_empty() {
+    let mode_bot_count = config
+        .channels_config
+        .mattermost_bots
+        .iter()
+        .filter(|mm| mm.mode.is_some())
+        .count();
+
+    if channels.is_empty() && mode_bot_count == 0 {
         println!("No real-time channels configured. Run `zeroclaw onboard` first.");
         return Ok(());
     }
@@ -3165,6 +3177,12 @@ pub async fn doctor_channels(config: Config) -> Result<()> {
 
     if config.channels_config.webhook.is_some() {
         println!("  ℹ️  Webhook   check via `zeroclaw gateway` then GET /health");
+    }
+    if mode_bot_count > 0 {
+        println!(
+            "  ℹ️  {mode_bot_count} mode-linked Mattermost bot(s) are not checked here; \
+             verify their tokens by running `zeroclaw start` and checking startup output."
+        );
     }
 
     println!();
@@ -3383,6 +3401,7 @@ pub async fn start_channels(config: Config) -> Result<()> {
     }
 
     // Collect active channels from a shared builder to keep startup and doctor parity.
+    // Mode-linked mattermost bots are excluded here; they get their own contexts below.
     let mut channels: Vec<Arc<dyn Channel>> =
         collect_configured_channels(&config, "runtime startup")
             .into_iter()
@@ -3394,7 +3413,12 @@ pub async fn start_channels(config: Config) -> Result<()> {
             NostrChannel::new(&ns.private_key, ns.relays.clone(), &ns.allowed_pubkeys).await?,
         ));
     }
-    if channels.is_empty() {
+    let has_mode_linked_bots = config
+        .channels_config
+        .mattermost_bots
+        .iter()
+        .any(|mm| mm.mode.is_some());
+    if channels.is_empty() && !has_mode_linked_bots {
         println!("No channels configured. Run `zeroclaw onboard` to set up channels.");
         return Ok(());
     }
@@ -3410,14 +3434,25 @@ pub async fn start_channels(config: Config) -> Result<()> {
         effective_backend,
         if config.memory.auto_save { "on" } else { "off" }
     );
-    println!(
-        "  📡 Channels: {}",
-        channels
-            .iter()
-            .map(|c| c.name())
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
+    if !channels.is_empty() {
+        println!(
+            "  📡 Channels: {}",
+            channels
+                .iter()
+                .map(|c| c.name())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    let mode_bot_names: Vec<&str> = config
+        .channels_config
+        .mattermost_bots
+        .iter()
+        .filter_map(|mm| mm.mode.as_deref())
+        .collect();
+    if !mode_bot_names.is_empty() {
+        println!("  🤖 Mode bots: {}", mode_bot_names.join(", "));
+    }
     println!();
     println!("  Listening for messages... (Ctrl+C to stop)");
     println!();
@@ -3507,11 +3542,124 @@ pub async fn start_channels(config: Config) -> Result<()> {
         thread_mode_state,
     });
 
+    // ── Per-mode Mattermost bot contexts ────────────────────────────────────────
+    // Each mattermost_bots entry with `mode = "<name>"` gets its own:
+    //   - ChannelRuntimeContext (mode-specific prompt, tools, temperature)
+    //   - mpsc channel pair (isolated from the shared message bus)
+    //   - supervised listener + dispatch loop (spawned as tokio tasks)
+    // Provider and Memory are Arc-cloned from the shared instances.
+    let mut bot_dispatch_handles = Vec::new();
+    for mm in &config.channels_config.mattermost_bots {
+        let Some(ref mode_name) = mm.mode else {
+            continue;
+        };
+
+        // Fail fast: a mode-linked bot with no matching mode definition is always a
+        // misconfiguration. Silently falling back to global defaults would violate
+        // Secure by Default — the global tool allowlist may be broader than the
+        // intended per-bot subset, and the wrong system prompt would be used.
+        let registry = runtime_ctx.mode_registry.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Mattermost bot has `mode = {:?}` but no [modes] section is configured. \
+                 Add a [modes.{}] entry or remove the `mode` field from this bot.",
+                mode_name,
+                mode_name
+            )
+        })?;
+        let mode_def = registry.get_mode(mode_name).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Mattermost bot references mode {:?}, which is not defined. \
+                 Available modes: [{}]. Check your [modes] config section.",
+                mode_name,
+                registry.mode_names().join(", ")
+            )
+        })?;
+        let bot_tool_allowlist = if mode_def.tool_allowlist.is_empty() {
+            Arc::clone(&runtime_ctx.global_tool_allowlist)
+        } else {
+            Arc::new(mode_def.tool_allowlist.clone())
+        };
+        let bot_system_prompt = Arc::new(mode_def.system_prompt.clone());
+        let bot_temperature = mode_def.temperature.unwrap_or(temperature);
+
+        let bot_channel: Arc<dyn Channel> = Arc::new(MattermostChannel::new(
+            mm.url.clone(),
+            mm.bot_token.clone(),
+            mm.channel_id.clone(),
+            mm.allowed_users.clone(),
+            mm.thread_replies.unwrap_or(true),
+            mm.mention_only.unwrap_or(false),
+        ));
+        let bot_channels_by_name = Arc::new(HashMap::from([(
+            "mattermost".to_string(),
+            Arc::clone(&bot_channel),
+        )]));
+        let mut bot_provider_cache: HashMap<String, Arc<dyn Provider>> = HashMap::new();
+        bot_provider_cache.insert(
+            runtime_ctx.default_provider.as_ref().clone(),
+            Arc::clone(&provider),
+        );
+
+        let bot_ctx = Arc::new(ChannelRuntimeContext {
+            channels_by_name: bot_channels_by_name,
+            provider: Arc::clone(&provider),
+            default_provider: Arc::clone(&runtime_ctx.default_provider),
+            memory: Arc::clone(&mem),
+            tools_registry: Arc::clone(&tools_registry),
+            observer: Arc::clone(&runtime_ctx.observer),
+            system_prompt: bot_system_prompt,
+            model: Arc::clone(&runtime_ctx.model),
+            temperature: bot_temperature,
+            auto_save_memory: runtime_ctx.auto_save_memory,
+            max_tool_iterations: runtime_ctx.max_tool_iterations,
+            min_relevance_score: runtime_ctx.min_relevance_score,
+            conversation_histories: Arc::new(Mutex::new(HashMap::new())),
+            provider_cache: Arc::new(Mutex::new(bot_provider_cache)),
+            route_overrides: Arc::new(Mutex::new(HashMap::new())),
+            api_key: runtime_ctx.api_key.clone(),
+            api_url: runtime_ctx.api_url.clone(),
+            reliability: Arc::clone(&runtime_ctx.reliability),
+            provider_runtime_options: runtime_ctx.provider_runtime_options.clone(),
+            workspace_dir: Arc::clone(&runtime_ctx.workspace_dir),
+            message_timeout_secs: runtime_ctx.message_timeout_secs,
+            interrupt_on_new_message: false,
+            multimodal: runtime_ctx.multimodal.clone(),
+            hooks: runtime_ctx.hooks.clone(),
+            non_cli_excluded_tools: Arc::clone(&runtime_ctx.non_cli_excluded_tools),
+            global_tool_allowlist: bot_tool_allowlist,
+            // Per-bot ctx: the channel IS the mode; no in-thread mode switching.
+            mode_registry: None,
+            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
+        });
+
+        tracing::info!(
+            mode = mode_name.as_str(),
+            "Spawning per-mode Mattermost bot context"
+        );
+
+        let (bot_tx, bot_rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(100);
+        handles.push(spawn_supervised_listener(
+            Arc::clone(&bot_channel),
+            bot_tx,
+            initial_backoff_secs,
+            max_backoff_secs,
+        ));
+        bot_dispatch_handles.push(tokio::spawn(run_message_dispatch_loop(
+            bot_rx,
+            bot_ctx,
+            compute_max_in_flight_messages(1),
+        )));
+    }
+
     run_message_dispatch_loop(rx, runtime_ctx, max_in_flight_messages).await;
 
-    // Wait for all channel tasks
+    // Wait for all channel tasks (shared + per-mode bot listeners)
     for h in handles {
         let _ = h.await;
+    }
+    // Wait for per-mode bot dispatch loops; surface panics via existing helper.
+    for h in bot_dispatch_handles {
+        log_worker_join_result(h.await);
     }
 
     Ok(())
@@ -6470,6 +6618,7 @@ This is an example JSON object for profile settings."#;
             allowed_users: vec![],
             thread_replies: Some(true),
             mention_only: Some(false),
+            mode: None,
         });
 
         let channels = collect_configured_channels(&config, "test");
@@ -6493,6 +6642,7 @@ This is an example JSON object for profile settings."#;
                 allowed_users: vec!["*".to_string()],
                 thread_replies: Some(true),
                 mention_only: Some(true),
+                mode: None,
             },
             crate::config::schema::MattermostConfig {
                 url: "http://localhost:8065".to_string(),
@@ -6501,6 +6651,7 @@ This is an example JSON object for profile settings."#;
                 allowed_users: vec!["*".to_string()],
                 thread_replies: Some(true),
                 mention_only: Some(true),
+                mode: None,
             },
         ];
 
@@ -6514,6 +6665,45 @@ This is an example JSON object for profile settings."#;
             mm_channels.len(),
             2,
             "expected one MattermostChannel per bot entry"
+        );
+    }
+
+    #[test]
+    fn collect_configured_channels_excludes_mode_linked_bots_from_shared_pool() {
+        let mut config = Config::default();
+        config.channels_config.mattermost_bots = vec![
+            // Mode-linked: excluded from shared pool (gets its own context in start_channels)
+            crate::config::schema::MattermostConfig {
+                url: "http://localhost:8065".to_string(),
+                bot_token: "zeroclaw_bot_a".to_string(),
+                channel_id: None,
+                allowed_users: vec!["*".to_string()],
+                thread_replies: Some(true),
+                mention_only: Some(true),
+                mode: Some("zeroclaw_pm".to_string()),
+            },
+            // Non-mode-linked: included in shared pool
+            crate::config::schema::MattermostConfig {
+                url: "http://localhost:8065".to_string(),
+                bot_token: "zeroclaw_bot_b".to_string(),
+                channel_id: None,
+                allowed_users: vec!["*".to_string()],
+                thread_replies: Some(true),
+                mention_only: Some(true),
+                mode: None,
+            },
+        ];
+
+        let channels = collect_configured_channels(&config, "test");
+
+        let mm_channels: Vec<_> = channels
+            .iter()
+            .filter(|e| e.channel.name() == "mattermost")
+            .collect();
+        assert_eq!(
+            mm_channels.len(),
+            1,
+            "mode-linked bots must be excluded from the shared pool"
         );
     }
 
