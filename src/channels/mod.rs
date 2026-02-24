@@ -2887,6 +2887,20 @@ fn collect_configured_channels(
         });
     }
 
+    for mm in &config.channels_config.mattermost_bots {
+        channels.push(ConfiguredChannel {
+            display_name: "Mattermost",
+            channel: Arc::new(MattermostChannel::new(
+                mm.url.clone(),
+                mm.bot_token.clone(),
+                mm.channel_id.clone(),
+                mm.allowed_users.clone(),
+                mm.thread_replies.unwrap_or(true),
+                mm.mention_only.unwrap_or(false),
+            )),
+        });
+    }
+
     if let Some(ref im) = config.channels_config.imessage {
         channels.push(ConfiguredChannel {
             display_name: "iMessage",
@@ -6467,6 +6481,41 @@ This is an example JSON object for profile settings."#;
         assert!(channels
             .iter()
             .any(|entry| entry.channel.name() == "mattermost"));
+    }
+
+    #[test]
+    fn collect_configured_channels_mattermost_bots_spawns_one_channel_per_entry() {
+        let mut config = Config::default();
+        config.channels_config.mattermost_bots = vec![
+            crate::config::schema::MattermostConfig {
+                url: "http://localhost:8065".to_string(),
+                bot_token: "token-sokka".to_string(),
+                channel_id: None,
+                allowed_users: vec!["*".to_string()],
+                thread_replies: Some(true),
+                mention_only: Some(true),
+            },
+            crate::config::schema::MattermostConfig {
+                url: "http://localhost:8065".to_string(),
+                bot_token: "token-toph".to_string(),
+                channel_id: None,
+                allowed_users: vec!["*".to_string()],
+                thread_replies: Some(true),
+                mention_only: Some(true),
+            },
+        ];
+
+        let channels = collect_configured_channels(&config, "test");
+
+        let mm_channels: Vec<_> = channels
+            .iter()
+            .filter(|e| e.channel.name() == "mattermost")
+            .collect();
+        assert_eq!(
+            mm_channels.len(),
+            2,
+            "expected one MattermostChannel per bot entry"
+        );
     }
 
     struct AlwaysFailChannel {

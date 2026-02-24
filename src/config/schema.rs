@@ -2528,8 +2528,13 @@ pub struct ChannelsConfig {
     pub discord: Option<DiscordConfig>,
     /// Slack bot channel configuration.
     pub slack: Option<SlackConfig>,
-    /// Mattermost bot channel configuration.
+    /// Mattermost bot channel configuration (single bot).
     pub mattermost: Option<MattermostConfig>,
+    /// Multiple Mattermost bot channels — one entry per bot token.
+    /// Use `[[channels_config.mattermost_bots]]` in TOML.
+    /// Each entry spawns an independent `MattermostChannel` within a single process.
+    #[serde(default)]
+    pub mattermost_bots: Vec<MattermostConfig>,
     /// Webhook channel configuration.
     pub webhook: Option<WebhookConfig>,
     /// iMessage channel configuration (macOS only).
@@ -2670,6 +2675,7 @@ impl Default for ChannelsConfig {
             discord: None,
             slack: None,
             mattermost: None,
+            mattermost_bots: vec![],
             webhook: None,
             imessage: None,
             matrix: None,
@@ -4807,6 +4813,7 @@ default_temperature = 0.7
                 discord: None,
                 slack: None,
                 mattermost: None,
+                mattermost_bots: vec![],
                 webhook: None,
                 imessage: None,
                 matrix: None,
@@ -5366,6 +5373,7 @@ allowed_users = ["@ops:matrix.org"]
             discord: None,
             slack: None,
             mattermost: None,
+            mattermost_bots: vec![],
             webhook: None,
             imessage: Some(IMessageConfig {
                 allowed_contacts: vec!["+1".into()],
@@ -5579,6 +5587,7 @@ channel_id = "C123"
             discord: None,
             slack: None,
             mattermost: None,
+            mattermost_bots: vec![],
             webhook: None,
             imessage: None,
             matrix: None,
