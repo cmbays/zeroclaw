@@ -1,0 +1,5 @@
+[skill]
+name = "katara-pm"
+description = "Core PM mode skill for Katara: Linear issue management, project tracking, blocker escalation"
+version = "0.1.0"
+tags = ["pm", "katara", "linear", "project-management"]

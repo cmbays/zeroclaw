@@ -39,134 +39,133 @@ sqlite_path = "~/.zeroclaw/mattermost-hub.db"
 cli = false
 
 # ═══════════════════════════════════════════════════════════════════
-# BOT: zeroclaw_pm — PM (Linear, standups, backlog)
-# Temperature: 0.1  |  mention_only: true
-# ═══════════════════════════════════════════════════════════════════
-[[channels_config.mattermost_bots]]
-url = "http://localhost:8065"
-# Token from: echo $MM_TOKEN_PM
-bot_token = "REPLACE_WITH_MM_TOKEN_PM"
-allowed_users = ["*"]
-thread_replies = true
-mention_only = true
-mode = "zeroclaw_pm"
-
-# ═══════════════════════════════════════════════════════════════════
-# BOT: zeroclaw_devops — DevOps (shell, deployments, infra)
+# BOT: @sokka — Dev (code, debugging, shell, file ops)
 # Temperature: 0.3  |  mention_only: true
 # ═══════════════════════════════════════════════════════════════════
 [[channels_config.mattermost_bots]]
 url = "http://localhost:8065"
-# Token from: echo $MM_TOKEN_DEVOPS
-bot_token = "REPLACE_WITH_MM_TOKEN_DEVOPS"
+# Token from: echo $MM_TOKEN_SOKKA
+bot_token = "REPLACE_WITH_MM_TOKEN_SOKKA"
 allowed_users = ["*"]
 thread_replies = true
 mention_only = true
-mode = "zeroclaw_devops"
+mode = "sokka"
 
 # ═══════════════════════════════════════════════════════════════════
-# BOT: zeroclaw_security — Security (code review, scanning, audit)
+# BOT: @katara — PM (Linear, standups, backlog)
 # Temperature: 0.1  |  mention_only: true
 # ═══════════════════════════════════════════════════════════════════
 [[channels_config.mattermost_bots]]
 url = "http://localhost:8065"
-# Token from: echo $MM_TOKEN_SECURITY
-bot_token = "REPLACE_WITH_MM_TOKEN_SECURITY"
+# Token from: echo $MM_TOKEN_KATARA
+bot_token = "REPLACE_WITH_MM_TOKEN_KATARA"
 allowed_users = ["*"]
 thread_replies = true
 mention_only = true
-mode = "zeroclaw_security"
+mode = "katara"
 
 # ═══════════════════════════════════════════════════════════════════
-# BOT: zeroclaw_creative — Creative (ideation, architecture)
+# BOT: @toph — DevOps (shell, deployments, infra)
+# Temperature: 0.3  |  mention_only: true
+# ═══════════════════════════════════════════════════════════════════
+[[channels_config.mattermost_bots]]
+url = "http://localhost:8065"
+# Token from: echo $MM_TOKEN_TOPH
+bot_token = "REPLACE_WITH_MM_TOKEN_TOPH"
+allowed_users = ["*"]
+thread_replies = true
+mention_only = true
+mode = "toph"
+
+# ═══════════════════════════════════════════════════════════════════
+# BOT: @azula — Security (code review, scanning, audit)
+# Temperature: 0.1  |  mention_only: true
+# ═══════════════════════════════════════════════════════════════════
+[[channels_config.mattermost_bots]]
+url = "http://localhost:8065"
+# Token from: echo $MM_TOKEN_AZULA
+bot_token = "REPLACE_WITH_MM_TOKEN_AZULA"
+allowed_users = ["*"]
+thread_replies = true
+mention_only = true
+mode = "azula"
+
+# ═══════════════════════════════════════════════════════════════════
+# BOT: @iroh — Creative (ideation, architecture)
 # Temperature: 0.8  |  mention_only: true
 # ═══════════════════════════════════════════════════════════════════
 [[channels_config.mattermost_bots]]
 url = "http://localhost:8065"
-# Token from: echo $MM_TOKEN_CREATIVE
-bot_token = "REPLACE_WITH_MM_TOKEN_CREATIVE"
+# Token from: echo $MM_TOKEN_IROH
+bot_token = "REPLACE_WITH_MM_TOKEN_IROH"
 allowed_users = ["*"]
 thread_replies = true
 mention_only = true
-mode = "zeroclaw_creative"
+mode = "iroh"
 
 # ═══════════════════════════════════════════════════════════════════
-# BOT: zeroclaw_dev — Dev (code, debugging, PR review)
-# Temperature: 0.3  |  mention_only: true
-# ═══════════════════════════════════════════════════════════════════
-[[channels_config.mattermost_bots]]
-url = "http://localhost:8065"
-# Token from: echo $MM_TOKEN_DEV
-bot_token = "REPLACE_WITH_MM_TOKEN_DEV"
-allowed_users = ["*"]
-thread_replies = true
-mention_only = true
-mode = "zeroclaw_dev"
-
-# ═══════════════════════════════════════════════════════════════════
-# BOT: zeroclaw_coordinator — Coordinator (delegate, big picture)
+# BOT: @aang — Coordinator (delegate, big picture)
 # Temperature: 0.5  |  mention_only: true
 # ═══════════════════════════════════════════════════════════════════
 [[channels_config.mattermost_bots]]
 url = "http://localhost:8065"
-# Token from: echo $MM_TOKEN_COORDINATOR
-bot_token = "REPLACE_WITH_MM_TOKEN_COORDINATOR"
+# Token from: echo $MM_TOKEN_AANG
+bot_token = "REPLACE_WITH_MM_TOKEN_AANG"
 allowed_users = ["*"]
 thread_replies = true
 mention_only = true
-mode = "zeroclaw_coordinator"
+mode = "aang"
 
 # ═══════════════════════════════════════════════════════════════════
 # Per-mode brain definitions
 #
 # Each [modes.<name>] entry is linked to the bot above via `mode = "<name>"`.
 # The bot gets its own ChannelRuntimeContext using:
-#   - system_prompt: built from aieos_path identity file (optional)
+#   - system_prompt: built from aieos_path identity file
 #   - tool_allowlist: only these tools are offered to the model
 #   - temperature: overrides default_temperature for this bot
 #
-# Identity files live in modes/<name>/identity.json (AIEOS format).
-# See docs/planning/spike-mattermost-hub.md for the AIEOS schema.
+# Identity files live in modes/<name>/identity.json (AIEOS v1.1 format).
 # ═══════════════════════════════════════════════════════════════════
 
-[modes.zeroclaw_pm]
-# PM bot — Linear project management, standups, backlog grooming
+[modes.sokka]
+# Dev bot — coding, debugging, file ops, codebase search
 identity_format = "aieos"
-aieos_path = "modes/zeroclaw_pm/identity.json"
-tool_allowlist = ["linear", "memory_store", "memory_recall", "memory_forget", "ask_user"]
-temperature = 0.1
-
-[modes.zeroclaw_devops]
-# DevOps bot — shell execution, file ops, HTTP requests, infra
-identity_format = "aieos"
-aieos_path = "modes/zeroclaw_devops/identity.json"
-tool_allowlist = ["shell", "file_read", "file_write", "file_edit", "glob", "http_request", "ask_user"]
-temperature = 0.3
-
-[modes.zeroclaw_security]
-# Security bot — code review, vulnerability scanning, audit
-identity_format = "aieos"
-aieos_path = "modes/zeroclaw_security/identity.json"
-tool_allowlist = ["content_search", "file_read", "glob", "ask_user"]
-temperature = 0.1
-
-[modes.zeroclaw_creative]
-# Creative bot — ideation, architecture, mentorship
-identity_format = "aieos"
-aieos_path = "modes/zeroclaw_creative/identity.json"
-tool_allowlist = ["memory_store", "memory_recall", "ask_user"]
-temperature = 0.8
-
-[modes.zeroclaw_dev]
-# Dev bot — coding, debugging, PR review
-identity_format = "aieos"
-aieos_path = "modes/zeroclaw_dev/identity.json"
+aieos_path = "modes/sokka/identity.json"
 tool_allowlist = ["shell", "file_read", "file_write", "file_edit", "glob", "content_search", "ask_user"]
 temperature = 0.3
 
-[modes.zeroclaw_coordinator]
-# Coordinator bot — delegation, big picture, cross-bot orchestration
+[modes.katara]
+# PM bot — Linear project management, standups, backlog grooming
 identity_format = "aieos"
-aieos_path = "modes/zeroclaw_coordinator/identity.json"
+aieos_path = "modes/katara/identity.json"
+tool_allowlist = ["linear", "memory_store", "memory_recall", "memory_forget", "ask_user"]
+temperature = 0.1
+
+[modes.toph]
+# DevOps bot — shell execution, file ops, HTTP requests, infra
+# identity_format = "aieos"
+# aieos_path = "modes/toph/identity.json"
+tool_allowlist = ["shell", "file_read", "file_write", "file_edit", "glob", "http_request", "ask_user"]
+temperature = 0.3
+
+[modes.azula]
+# Security bot — code review, vulnerability scanning, audit
+# identity_format = "aieos"
+# aieos_path = "modes/azula/identity.json"
+tool_allowlist = ["content_search", "file_read", "glob", "ask_user"]
+temperature = 0.1
+
+[modes.iroh]
+# Creative bot — ideation, architecture, mentorship
+# identity_format = "aieos"
+# aieos_path = "modes/iroh/identity.json"
+tool_allowlist = ["memory_store", "memory_recall", "ask_user"]
+temperature = 0.8
+
+[modes.aang]
+# Coordinator bot — delegation, big picture, cross-bot orchestration
+# identity_format = "aieos"
+# aieos_path = "modes/aang/identity.json"
 tool_allowlist = ["delegate", "memory_store", "memory_recall", "ask_user"]
 temperature = 0.5
