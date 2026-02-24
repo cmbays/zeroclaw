@@ -3171,6 +3171,18 @@ pub async fn doctor_channels(config: Config) -> Result<()> {
     if config.channels_config.webhook.is_some() {
         println!("  ℹ️  Webhook   check via `zeroclaw gateway` then GET /health");
     }
+    let mode_bot_count = config
+        .channels_config
+        .mattermost_bots
+        .iter()
+        .filter(|mm| mm.mode.is_some())
+        .count();
+    if mode_bot_count > 0 {
+        println!(
+            "  ℹ️  {mode_bot_count} mode-linked Mattermost bot(s) are not checked here; \
+             verify their tokens by running `zeroclaw start` and checking startup output."
+        );
+    }
 
     println!();
     println!("Summary: {healthy} healthy, {unhealthy} unhealthy, {timeout} timed out");
@@ -3421,14 +3433,25 @@ pub async fn start_channels(config: Config) -> Result<()> {
         effective_backend,
         if config.memory.auto_save { "on" } else { "off" }
     );
-    println!(
-        "  📡 Channels: {}",
-        channels
-            .iter()
-            .map(|c| c.name())
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
+    if !channels.is_empty() {
+        println!(
+            "  📡 Channels: {}",
+            channels
+                .iter()
+                .map(|c| c.name())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    let mode_bot_names: Vec<&str> = config
+        .channels_config
+        .mattermost_bots
+        .iter()
+        .filter_map(|mm| mm.mode.as_deref())
+        .collect();
+    if !mode_bot_names.is_empty() {
+        println!("  🤖 Mode bots: {}", mode_bot_names.join(", "));
+    }
     println!();
     println!("  Listening for messages... (Ctrl+C to stop)");
     println!();
@@ -3530,36 +3553,33 @@ pub async fn start_channels(config: Config) -> Result<()> {
             continue;
         };
 
-        let (bot_system_prompt, bot_temperature, bot_tool_allowlist) = match runtime_ctx
-            .mode_registry
-            .as_ref()
-            .and_then(|r| r.get_mode(mode_name))
-        {
-            Some(mode_def) => {
-                let allowlist = if mode_def.tool_allowlist.is_empty() {
-                    Arc::clone(&runtime_ctx.global_tool_allowlist)
-                } else {
-                    Arc::new(mode_def.tool_allowlist.clone())
-                };
-                (
-                    Arc::new(mode_def.system_prompt.clone()),
-                    mode_def.temperature.unwrap_or(temperature),
-                    allowlist,
-                )
-            }
-            None => {
-                tracing::warn!(
-                    mode = mode_name.as_str(),
-                    "Mattermost bot references unknown or unconfigured mode; \
-                         using global defaults"
-                );
-                (
-                    Arc::clone(&runtime_ctx.system_prompt),
-                    temperature,
-                    Arc::clone(&runtime_ctx.global_tool_allowlist),
-                )
-            }
+        // Fail fast: a mode-linked bot with no matching mode definition is always a
+        // misconfiguration. Silently falling back to global defaults would violate
+        // Secure by Default — the global tool allowlist may be broader than the
+        // intended per-bot subset, and the wrong system prompt would be used.
+        let registry = runtime_ctx.mode_registry.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Mattermost bot has `mode = {:?}` but no [modes] section is configured. \
+                 Add a [modes.{}] entry or remove the `mode` field from this bot.",
+                mode_name,
+                mode_name
+            )
+        })?;
+        let mode_def = registry.get_mode(mode_name).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Mattermost bot references mode {:?}, which is not defined. \
+                 Available modes: [{}]. Check your [modes] config section.",
+                mode_name,
+                registry.mode_names().join(", ")
+            )
+        })?;
+        let bot_tool_allowlist = if mode_def.tool_allowlist.is_empty() {
+            Arc::clone(&runtime_ctx.global_tool_allowlist)
+        } else {
+            Arc::new(mode_def.tool_allowlist.clone())
         };
+        let bot_system_prompt = Arc::new(mode_def.system_prompt.clone());
+        let bot_temperature = mode_def.temperature.unwrap_or(temperature);
 
         let bot_channel: Arc<dyn Channel> = Arc::new(MattermostChannel::new(
             mm.url.clone(),
@@ -3636,9 +3656,9 @@ pub async fn start_channels(config: Config) -> Result<()> {
     for h in handles {
         let _ = h.await;
     }
-    // Wait for per-mode bot dispatch loops
+    // Wait for per-mode bot dispatch loops; surface panics via existing helper.
     for h in bot_dispatch_handles {
-        let _ = h.await;
+        log_worker_join_result(h.await);
     }
 
     Ok(())
