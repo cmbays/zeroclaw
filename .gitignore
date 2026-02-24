@@ -33,3 +33,14 @@ venv/
 *.pem
 credentials.json
 .worktrees/
+
+# Mattermost Hub secrets (templates are committed, actuals are not)
+infra/mattermost/.env
+.envrc.mattermost
+config/config.mattermost.toml
+config/config.sokka.toml
+config/config.toph.toml
+config/config.azula.toml
+config/config.iroh.toml
+config/config.katara.toml
+config/config.aang.toml

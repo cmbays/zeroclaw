@@ -1,0 +1,93 @@
+# Mattermost Hub — Docker Compose
+#
+# Services:
+#   - postgres:      Mattermost database (ARM64-native postgres:15-alpine)
+#   - mattermost:    Team Edition (official image, ARM64-compatible via Rosetta on Apple Silicon)
+#
+# Usage:
+#   cp .env.example .env    # fill in passwords
+#   docker compose up -d
+#   open http://localhost:8065
+#
+# First-time setup:
+#   docker compose up -d
+#   # Wait ~30s for Mattermost to start, then:
+#   ../../scripts/mattermost-setup.sh
+#
+# Note: On Apple Silicon (M1/M2/M3), Docker Desktop uses Rosetta 2 to run the
+# amd64 Mattermost image. Performance is acceptable for local development.
+# Community ARM64 builds (e.g. skylord723/mattermost-team-edition-arm64) can
+# be substituted in the `image:` field if Rosetta overhead becomes an issue.
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: mm-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${MM_POSTGRES_USER:-mattermost}
+      POSTGRES_PASSWORD: ${MM_POSTGRES_PASSWORD:?MM_POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${MM_POSTGRES_DB:-mattermost}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - mm-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${MM_POSTGRES_USER:-mattermost}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mattermost:
+    image: mattermost/mattermost-team-edition:latest
+    container_name: mattermost
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      MM_SQLSETTINGS_DRIVERNAME: postgres
+      MM_SQLSETTINGS_DATASOURCE: >-
+        postgres://${MM_POSTGRES_USER:-mattermost}:${MM_POSTGRES_PASSWORD:?MM_POSTGRES_PASSWORD is required}@postgres:5432/${MM_POSTGRES_DB:-mattermost}?sslmode=disable&connect_timeout=10
+      MM_SERVICESETTINGS_SITEURL: ${MM_SITE_URL:-http://localhost:8065}
+      # Allow bots to override their username/icon via incoming webhooks
+      MM_SERVICESETTINGS_ENABLEPOSTUSERNAMEOVERRIDE: "true"
+      MM_SERVICESETTINGS_ENABLEPOSTCOUNTEROVERRIDE: "true"
+      # Bot accounts
+      MM_SERVICESETTINGS_ENABLEBOTACCOUNTCREATION: "true"
+      # Disable email for local dev (no SMTP configured)
+      MM_EMAILSETTINGS_SENDEMAILNOTIFICATIONS: "false"
+      MM_EMAILSETTINGS_REQUIREEMAILVERIFICATION: "false"
+      # File storage (local, inside container)
+      MM_FILESETTINGS_DRIVERNAME: local
+      MM_FILESETTINGS_DIRECTORY: /mattermost/data/
+      # Logging — console only for local dev
+      MM_LOGSETTINGS_ENABLECONSOLE: "true"
+      MM_LOGSETTINGS_CONSOLELEVEL: INFO
+      MM_LOGSETTINGS_ENABLEFILE: "false"
+    ports:
+      - "127.0.0.1:8065:8065"
+    volumes:
+      - mm-config:/mattermost/config
+      - mm-data:/mattermost/data
+      - mm-logs:/mattermost/logs
+      - mm-plugins:/mattermost/plugins
+    networks:
+      - mm-net
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8065/api/v4/system/ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 8
+      start_period: 30s
+
+networks:
+  mm-net:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  mm-config:
+  mm-data:
+  mm-logs:
+  mm-plugins:
