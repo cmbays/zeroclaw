@@ -4,6 +4,7 @@ use futures_util::{SinkExt, StreamExt};
 use parking_lot::Mutex;
 use serde_json::json;
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
 
@@ -165,6 +166,8 @@ fn pick_uniform_index(len: usize) -> usize {
     loop {
         let value = rand::random::<u64>();
         if value < reject_threshold {
+            // value % upper is always < upper (a usize), so truncation cannot occur.
+            #[allow(clippy::cast_possible_truncation)]
             return (value % upper) as usize;
         }
     }
@@ -186,7 +189,7 @@ fn encode_emoji_for_discord(emoji: &str) -> String {
 
     let mut encoded = String::new();
     for byte in emoji.as_bytes() {
-        encoded.push_str(&format!("%{byte:02X}"));
+        write!(encoded, "%{byte:02X}").unwrap();
     }
     encoded
 }
@@ -1151,6 +1154,7 @@ mod tests {
     #[test]
     fn split_message_many_short_lines() {
         // Many short lines should be batched into chunks under the limit
+        #[allow(clippy::format_collect)]
         let msg: String = (0..500).map(|i| format!("line {i}\n")).collect();
         let parts = split_message_for_discord(&msg);
         for part in &parts {

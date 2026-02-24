@@ -2027,7 +2027,7 @@ mod tests {
         let msg = rx.try_recv().expect("confirm should forward message");
         // The format is "[block_action:{id}] {safe_value}".
         // Split on the closing "] " to isolate the value portion.
-        let value_part = msg.content.splitn(2, "] ").nth(1).unwrap_or("");
+        let value_part = msg.content.split_once("] ").map(|x| x.1).unwrap_or("");
         assert!(
             !value_part.contains('['),
             "[ must be stripped from button value"

@@ -41,7 +41,7 @@ pub mod whatsapp_storage;
 #[cfg(feature = "whatsapp-web")]
 pub mod whatsapp_web;
 
-pub use clawdtalk::{ClawdTalkChannel, ClawdTalkConfig};
+pub use clawdtalk::ClawdTalkChannel;
 pub use cli::CliChannel;
 pub use dingtalk::DingTalkChannel;
 pub use discord::DiscordChannel;
@@ -278,10 +278,7 @@ fn interruption_scope_key(msg: &traits::ChannelMessage) -> String {
 ///
 /// Activation only persists for threaded conversations (messages with `thread_ts`).
 /// Non-threaded activations apply to the single message only and are not stored.
-fn resolve_thread_mode(
-    ctx: &ChannelRuntimeContext,
-    msg: &traits::ChannelMessage,
-) -> Vec<String> {
+fn resolve_thread_mode(ctx: &ChannelRuntimeContext, msg: &traits::ChannelMessage) -> Vec<String> {
     let Some(registry) = ctx.mode_registry.as_ref() else {
         return Vec::new();
     };
@@ -321,7 +318,7 @@ fn resolve_thread_mode(
 /// `finalize_draft` trait should be extended to accept optional identity overrides.
 fn apply_mode_identity(
     msg: SendMessage,
-    vi: &Option<crate::config::VisualIdentityConfig>,
+    vi: Option<&crate::config::VisualIdentityConfig>,
 ) -> SendMessage {
     match vi {
         Some(vi) => msg.with_identity(vi.username.clone(), vi.icon_emoji.clone()),
@@ -1342,9 +1339,7 @@ fn sanitize_tool_json_value(
         return None;
     }
 
-    let Some(object) = value.as_object() else {
-        return None;
-    };
+    let object = value.as_object()?;
 
     if let Some(tool_calls) = object.get("tool_calls").and_then(|value| value.as_array()) {
         if !tool_calls.is_empty()
@@ -1384,7 +1379,7 @@ fn strip_isolated_tool_json_artifacts(message: &str, known_tool_names: &HashSet<
     let mut saw_tool_call_payload = false;
 
     while cursor < message.len() {
-        let Some(rel_start) = message[cursor..].find(|ch: char| ch == '{' || ch == '[') else {
+        let Some(rel_start) = message[cursor..].find(['{', '[']) else {
             cleaned.push_str(&message[cursor..]);
             break;
         };
@@ -1697,7 +1692,7 @@ async fn process_channel_message(
                         .send(&apply_mode_identity(
                             SendMessage::new(message, &msg.reply_target)
                                 .in_thread(msg.thread_ts.clone()),
-                            &mode_visual_identity,
+                            mode_visual_identity.as_ref(),
                         ))
                         .await;
                 }
@@ -1730,7 +1725,8 @@ async fn process_channel_message(
         // history. Follow-up turns already include context from previous messages.
         if !had_prior_history {
             let memory_context =
-                build_memory_context(ctx.memory.as_ref(), &msg.content, ctx.min_relevance_score).await;
+                build_memory_context(ctx.memory.as_ref(), &msg.content, ctx.min_relevance_score)
+                    .await;
             if let Some(last_turn) = prior_turns.last_mut() {
                 if last_turn.role == "user" && !memory_context.is_empty() {
                     last_turn.content = format!("{memory_context}{}", msg.content);
@@ -1747,8 +1743,10 @@ async fn process_channel_message(
         history.extend(prior_turns);
 
         // Disable streaming for multi-mode dispatch to avoid interleaved draft updates.
-        let use_streaming =
-            !multi_mode && target_channel.as_ref().is_some_and(|ch| ch.supports_draft_updates());
+        let use_streaming = !multi_mode
+            && target_channel
+                .as_ref()
+                .is_some_and(|ch| ch.supports_draft_updates());
 
         tracing::debug!(
             channel = %msg.channel,
@@ -1770,7 +1768,7 @@ async fn process_channel_message(
                 match channel
                     .send_draft(&apply_mode_identity(
                         SendMessage::new("...", &msg.reply_target).in_thread(msg.thread_ts.clone()),
-                        &mode_visual_identity,
+                        mode_visual_identity.as_ref(),
                     ))
                     .await
                 {
@@ -1825,14 +1823,13 @@ async fn process_channel_message(
             .and_then(|name| ctx.mode_registry.as_ref()?.get_mode(name))
             .map(|m| &m.tool_allowlist)
             .filter(|l| !l.is_empty());
-        let effective_allowlist: Option<&Vec<String>> =
-            mode_allowlist.or_else(|| {
-                if ctx.global_tool_allowlist.is_empty() {
-                    None
-                } else {
-                    Some(&ctx.global_tool_allowlist)
-                }
-            });
+        let effective_allowlist: Option<&Vec<String>> = mode_allowlist.or_else(|| {
+            if ctx.global_tool_allowlist.is_empty() {
+                None
+            } else {
+                Some(&ctx.global_tool_allowlist)
+            }
+        });
         let mode_excluded: Vec<String> = match effective_allowlist {
             None => Vec::new(),
             Some(allowlist) => {
@@ -2040,7 +2037,7 @@ async fn process_channel_message(
                                 .send(&apply_mode_identity(
                                     SendMessage::new(&delivered_response, &msg.reply_target)
                                         .in_thread(msg.thread_ts.clone()),
-                                    &mode_visual_identity,
+                                    mode_visual_identity.as_ref(),
                                 ))
                                 .await;
                         }
@@ -2048,7 +2045,7 @@ async fn process_channel_message(
                         .send(&apply_mode_identity(
                             SendMessage::new(delivered_response, &msg.reply_target)
                                 .in_thread(msg.thread_ts.clone()),
-                            &mode_visual_identity,
+                            mode_visual_identity.as_ref(),
                         ))
                         .await
                     {
@@ -2122,7 +2119,7 @@ async fn process_channel_message(
                                 .send(&apply_mode_identity(
                                     SendMessage::new(error_text, &msg.reply_target)
                                         .in_thread(msg.thread_ts.clone()),
-                                    &mode_visual_identity,
+                                    mode_visual_identity.as_ref(),
                                 ))
                                 .await;
                         }
@@ -2148,7 +2145,9 @@ async fn process_channel_message(
                     );
                     let should_rollback_user_turn = e
                         .downcast_ref::<providers::ProviderCapabilityError>()
-                        .is_some_and(|capability| capability.capability.eq_ignore_ascii_case("vision"));
+                        .is_some_and(|capability| {
+                            capability.capability.eq_ignore_ascii_case("vision")
+                        });
                     let rolled_back = should_rollback_user_turn
                         && rollback_orphan_user_turn(ctx.as_ref(), &history_key, &msg.content);
 
@@ -2172,7 +2171,7 @@ async fn process_channel_message(
                                 .send(&apply_mode_identity(
                                     SendMessage::new(error_text, &msg.reply_target)
                                         .in_thread(msg.thread_ts.clone()),
-                                    &mode_visual_identity,
+                                    mode_visual_identity.as_ref(),
                                 ))
                                 .await;
                         }
@@ -2221,7 +2220,7 @@ async fn process_channel_message(
                             .send(&apply_mode_identity(
                                 SendMessage::new(error_text, &msg.reply_target)
                                     .in_thread(msg.thread_ts.clone()),
-                                &mode_visual_identity,
+                                mode_visual_identity.as_ref(),
                             ))
                             .await;
                     }
@@ -2828,7 +2827,7 @@ struct ConfiguredChannel {
 
 fn collect_configured_channels(
     config: &Config,
-    _matrix_skip_context: &str,
+    matrix_skip_context: &str,
 ) -> Vec<ConfiguredChannel> {
     let mut channels = Vec::new();
 
@@ -2914,7 +2913,7 @@ fn collect_configured_channels(
     if config.channels_config.matrix.is_some() {
         tracing::warn!(
             "Matrix channel is configured but this build was compiled without `channel-matrix`; skipping Matrix {}.",
-            _matrix_skip_context
+            matrix_skip_context
         );
     }
 
@@ -3321,16 +3320,18 @@ pub async fn start_channels(config: Config) -> Result<()> {
         native_tools,
         config.skills.prompt_injection_mode,
     );
-    let tool_instructions_suffix = if !native_tools {
+    let tool_instructions_suffix = if native_tools {
+        String::new()
+    } else {
         let suffix = build_tool_instructions(tools_registry.as_ref());
         system_prompt.push_str(&suffix);
         suffix
-    } else {
-        String::new()
     };
 
     // ── Mode Layer ──────────────────────────────────────────────
-    let mode_registry = if !config.modes.is_empty() {
+    let mode_registry = if config.modes.is_empty() {
+        None
+    } else {
         match crate::modes::ModeRegistry::from_config(
             &config,
             &tool_descs,
@@ -3353,8 +3354,6 @@ pub async fn start_channels(config: Config) -> Result<()> {
                 None
             }
         }
-    } else {
-        None
     };
     let thread_mode_state = Arc::new(crate::modes::thread_state::ThreadModeState::new());
 
@@ -6984,7 +6983,7 @@ This is an example JSON object for profile settings."#;
     #[test]
     fn apply_mode_identity_none_vi_returns_message_unchanged() {
         let msg = traits::SendMessage::new("hello", "C123");
-        let result = apply_mode_identity(msg, &None);
+        let result = apply_mode_identity(msg, None);
         assert_eq!(result.username, None);
         assert_eq!(result.icon_emoji, None);
         assert_eq!(result.content, "hello");
@@ -6997,7 +6996,7 @@ This is an example JSON object for profile settings."#;
             icon_emoji: Some(":clipboard:".to_string()),
         });
         let msg = traits::SendMessage::new("hello", "C123");
-        let result = apply_mode_identity(msg, &vi);
+        let result = apply_mode_identity(msg, vi.as_ref());
         assert_eq!(result.username, Some("PM Bot".to_string()));
         assert_eq!(result.icon_emoji, Some(":clipboard:".to_string()));
     }
@@ -7009,7 +7008,7 @@ This is an example JSON object for profile settings."#;
             icon_emoji: None,
         });
         let msg = traits::SendMessage::new("hello", "C123");
-        let result = apply_mode_identity(msg, &vi);
+        let result = apply_mode_identity(msg, vi.as_ref());
         assert_eq!(result.username, None);
         assert_eq!(result.icon_emoji, None);
     }
