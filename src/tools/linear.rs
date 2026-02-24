@@ -156,7 +156,28 @@ impl LinearTool {
         let data = self.graphql(query, json!({ "filter": filter })).await?;
         let nodes = match data["issues"]["nodes"].as_array() {
             Some(a) if !a.is_empty() => a.clone(),
-            _ => {
+            Some(_) => {
+                // Legitimate empty result — no issues match the filter.
+                return Ok(ToolResult {
+                    success: true,
+                    output: "No issues found.".into(),
+                    error: None,
+                });
+            }
+            None => {
+                // Schema mismatch: 'issues' or 'issues.nodes' is missing / wrong type.
+                if data["issues"].is_null() {
+                    tracing::warn!(
+                        "list_issues: 'issues' field is missing or null in Linear GraphQL \
+                         response; possible API schema change"
+                    );
+                } else {
+                    tracing::warn!(
+                        actual = %data["issues"]["nodes"],
+                        "list_issues: 'issues.nodes' is not an array in Linear GraphQL \
+                         response; possible API schema change"
+                    );
+                }
                 return Ok(ToolResult {
                     success: true,
                     output: "No issues found.".into(),
@@ -332,7 +353,34 @@ impl LinearTool {
             .await?;
         let nodes = match data["team"]["templates"]["nodes"].as_array() {
             Some(a) if !a.is_empty() => a.clone(),
-            _ => {
+            Some(_) => {
+                // Legitimate empty result — team has no templates.
+                return Ok(ToolResult {
+                    success: true,
+                    output: "No templates found.".into(),
+                    error: None,
+                });
+            }
+            None => {
+                // Schema mismatch: one of 'team', 'team.templates', or
+                // 'team.templates.nodes' is missing / wrong type.
+                if data["team"].is_null() {
+                    tracing::warn!(
+                        "list_templates: 'team' field is missing or null in Linear GraphQL \
+                         response; possible API schema change"
+                    );
+                } else if data["team"]["templates"].is_null() {
+                    tracing::warn!(
+                        "list_templates: 'team.templates' field is missing or null in \
+                         Linear GraphQL response; possible API schema change"
+                    );
+                } else {
+                    tracing::warn!(
+                        actual = %data["team"]["templates"]["nodes"],
+                        "list_templates: 'team.templates.nodes' is not an array in Linear \
+                         GraphQL response; possible API schema change"
+                    );
+                }
                 return Ok(ToolResult {
                     success: true,
                     output: "No templates found.".into(),
@@ -624,5 +672,87 @@ mod tests {
             .as_deref()
             .unwrap_or("")
             .contains("At least one field"));
+    }
+
+    // ── list_issues schema-mismatch detection ────────────────────────────────
+
+    #[test]
+    fn list_issues_missing_issues_field_triggers_warn_path() {
+        // Absent key → serde_json returns Null → as_array() returns None → warn path.
+        let data = serde_json::json!({ "other": {} });
+        assert!(
+            data["issues"].is_null(),
+            "absent 'issues' key must be null (triggers warn)"
+        );
+        assert!(
+            data["issues"]["nodes"].as_array().is_none(),
+            "must hit the None arm"
+        );
+    }
+
+    #[test]
+    fn list_issues_non_array_nodes_triggers_warn_path() {
+        let data = serde_json::json!({ "issues": { "nodes": "bad-value" } });
+        assert!(!data["issues"].is_null(), "issues is present");
+        assert!(
+            data["issues"]["nodes"].as_array().is_none(),
+            "non-array 'nodes' must hit the None arm (triggers warn)"
+        );
+    }
+
+    #[test]
+    fn list_issues_empty_array_is_silent_ok() {
+        // An empty array is a legitimate "no results" — must NOT trigger the warn path.
+        let data = serde_json::json!({ "issues": { "nodes": [] } });
+        let arr = data["issues"]["nodes"]
+            .as_array()
+            .expect("should be an array");
+        assert!(arr.is_empty(), "empty array is a valid no-results response");
+    }
+
+    // ── list_templates schema-mismatch detection ─────────────────────────────
+
+    #[test]
+    fn list_templates_missing_team_field_triggers_warn_path() {
+        let data = serde_json::json!({ "other": {} });
+        assert!(data["team"].is_null(), "absent 'team' key must be null");
+        assert!(
+            data["team"]["templates"]["nodes"].as_array().is_none(),
+            "must hit the None arm"
+        );
+    }
+
+    #[test]
+    fn list_templates_missing_templates_field_triggers_warn_path() {
+        let data = serde_json::json!({ "team": { "other": {} } });
+        assert!(!data["team"].is_null(), "team is present");
+        assert!(
+            data["team"]["templates"].is_null(),
+            "absent 'templates' key must be null"
+        );
+        assert!(
+            data["team"]["templates"]["nodes"].as_array().is_none(),
+            "must hit the None arm"
+        );
+    }
+
+    #[test]
+    fn list_templates_non_array_nodes_triggers_warn_path() {
+        let data = serde_json::json!({ "team": { "templates": { "nodes": 42 } } });
+        assert!(!data["team"].is_null());
+        assert!(!data["team"]["templates"].is_null());
+        assert!(
+            data["team"]["templates"]["nodes"].as_array().is_none(),
+            "non-array 'nodes' must hit the None arm (triggers warn)"
+        );
+    }
+
+    #[test]
+    fn list_templates_empty_array_is_silent_ok() {
+        let data = serde_json::json!({ "team": { "templates": { "nodes": [] } } });
+        let arr = data["team"]["templates"]["nodes"]
+            .as_array()
+            .expect("should be an array");
+        assert!(arr.is_empty(), "empty array is a valid no-results response");
     }
 }

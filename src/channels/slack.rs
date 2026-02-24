@@ -78,16 +78,27 @@ impl SlackChannel {
 
     /// Get the bot's own user ID so we can ignore our own messages
     async fn get_bot_user_id(&self) -> Option<String> {
-        let resp: serde_json::Value = self
+        let response = match self
             .http_client()
             .get("https://slack.com/api/auth.test")
             .bearer_auth(&self.bot_token)
             .send()
             .await
-            .ok()?
-            .json()
-            .await
-            .ok()?;
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("Slack: auth.test request failed: {e}");
+                return None;
+            }
+        };
+
+        let resp: serde_json::Value = match response.json().await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("Slack: auth.test response is not valid JSON: {e}");
+                return None;
+            }
+        };
 
         resp.get("user_id")
             .and_then(|u| u.as_str())
@@ -178,7 +189,9 @@ impl SlackChannel {
                 anyhow::bail!("Slack conversations.list failed ({status}): {body}");
             }
 
-            let data: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            let data: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+                anyhow::anyhow!("Slack conversations.list: response is not valid JSON: {e}")
+            })?;
             if data.get("ok") == Some(&serde_json::Value::Bool(false)) {
                 let err = data
                     .get("error")
@@ -299,9 +312,30 @@ impl SlackChannel {
         let event = payload.get("event")?;
         let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
-        // Only process message and app_mention events
-        if event_type != "message" && event_type != "app_mention" {
-            return None;
+        // Only process message and app_mention events.
+        // For channel messages, Slack sends BOTH a "message" event AND an "app_mention"
+        // event for the same @mention. To avoid processing (and responding) twice, skip
+        // "message" events in channels that would be duplicated by "app_mention":
+        //   - top-level channel messages (no thread_ts)
+        //   - thread replies that start with <@ (app_mention fires for those too)
+        // Thread follow-ups WITHOUT an @mention only fire "message", so we forward
+        // those to support conversation continuation within a thread.
+        // DM channels (ID starts with 'D') never generate "app_mention", so we always
+        // forward "message" events there.
+        match event_type {
+            "app_mention" => {}
+            "message" => {
+                let channel_id = event.get("channel").and_then(|c| c.as_str()).unwrap_or("");
+                if !channel_id.starts_with('D') {
+                    let thread_ts = event.get("thread_ts").and_then(|t| t.as_str());
+                    let text = event.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                    if thread_ts.is_none() || text.trim_start().starts_with("<@") {
+                        return None; // top-level or @mention thread reply — handled via app_mention
+                    }
+                    // thread reply without @mention — forward for conversation continuation
+                }
+            }
+            _ => return None,
         }
 
         // Skip message subtypes (message_changed, message_deleted, bot_message, etc.)
@@ -684,7 +718,8 @@ impl SlackChannel {
             anyhow::bail!("Slack views.open failed ({status}): {body_text}");
         }
 
-        let parsed: serde_json::Value = serde_json::from_str(&body_text).unwrap_or_default();
+        let parsed: serde_json::Value = serde_json::from_str(&body_text)
+            .map_err(|e| anyhow::anyhow!("Slack views.open: response is not valid JSON: {e}"))?;
         if parsed.get("ok") == Some(&serde_json::Value::Bool(false)) {
             let err = parsed
                 .get("error")
@@ -1003,12 +1038,8 @@ impl SlackChannel {
                             .await?;
                     }
                     "view_submission" => {
-                        self.handle_view_submission(
-                            &envelope.payload,
-                            scoped_channel,
-                            tx,
-                        )
-                        .await?;
+                        self.handle_view_submission(&envelope.payload, scoped_channel, tx)
+                            .await?;
                     }
                     other => {
                         tracing::debug!("Slack: unknown interactive payload type: {other}");
@@ -1548,12 +1579,13 @@ mod tests {
 
     #[test]
     fn extract_event_message_normal() {
+        // DM channel (D-prefix) — message events are forwarded.
         let payload = serde_json::json!({
             "event": {
                 "type": "message",
                 "user": "U123",
                 "text": "hello world",
-                "channel": "C456",
+                "channel": "D456",
                 "ts": "1234567890.000001"
             }
         });
@@ -1562,19 +1594,20 @@ mod tests {
         let (user, text, channel, ts, thread_ts) = result.unwrap();
         assert_eq!(user, "U123");
         assert_eq!(text, "hello world");
-        assert_eq!(channel, "C456");
+        assert_eq!(channel, "D456");
         assert_eq!(ts, "1234567890.000001");
         assert_eq!(thread_ts.as_deref(), Some("1234567890.000001"));
     }
 
     #[test]
     fn extract_event_message_threaded_reply() {
+        // DM channel (D-prefix) threaded reply — thread_ts is preserved.
         let payload = serde_json::json!({
             "event": {
                 "type": "message",
                 "user": "U123",
                 "text": "reply in thread",
-                "channel": "C456",
+                "channel": "D456",
                 "ts": "1234567890.000010",
                 "thread_ts": "1234567890.000001"
             }
@@ -1659,6 +1692,85 @@ mod tests {
             }
         });
         assert!(SlackChannel::extract_event_message(&payload2, "BXXX").is_none());
+    }
+
+    #[test]
+    fn extract_event_message_channel_message_skipped_to_avoid_duplicate() {
+        // Slack sends BOTH "message" AND "app_mention" for an @mention in a channel.
+        // The "message" event in a channel (ID starts with C/G) must be skipped;
+        // the same content is handled by the "app_mention" event.
+        let payload = serde_json::json!({
+            "event": {
+                "type": "message",
+                "user": "U123",
+                "text": "<@BXXX> what's on the board?",
+                "channel": "C456",
+                "ts": "1234567890.000010"
+            }
+        });
+        assert!(
+            SlackChannel::extract_event_message(&payload, "BXXX").is_none(),
+            "message event in a channel should be skipped (handled by app_mention)"
+        );
+    }
+
+    #[test]
+    fn extract_event_message_dm_message_forwarded() {
+        // DM channels (ID starts with 'D') never generate app_mention,
+        // so "message" events there must be forwarded.
+        let payload = serde_json::json!({
+            "event": {
+                "type": "message",
+                "user": "U123",
+                "text": "hello",
+                "channel": "D789",
+                "ts": "1234567890.000011"
+            }
+        });
+        assert!(
+            SlackChannel::extract_event_message(&payload, "BXXX").is_some(),
+            "message event in a DM should be forwarded"
+        );
+    }
+
+    #[test]
+    fn extract_event_message_thread_reply_without_mention_forwarded() {
+        // Thread follow-up in a channel without @mention — should be forwarded so the
+        // bot can continue the conversation within the thread.
+        let payload = serde_json::json!({
+            "event": {
+                "type": "message",
+                "user": "U123",
+                "text": "list out the issues please",
+                "channel": "C456",
+                "ts": "1234567890.000020",
+                "thread_ts": "1234567890.000010"
+            }
+        });
+        assert!(
+            SlackChannel::extract_event_message(&payload, "BXXX").is_some(),
+            "thread reply without @mention should be forwarded for conversation continuation"
+        );
+    }
+
+    #[test]
+    fn extract_event_message_thread_reply_with_mention_skipped() {
+        // @mention inside a thread fires both "message" AND "app_mention".
+        // The "message" duplicate should be skipped; "app_mention" handles it.
+        let payload = serde_json::json!({
+            "event": {
+                "type": "message",
+                "user": "U123",
+                "text": "<@BXXX> list out the issues please",
+                "channel": "C456",
+                "ts": "1234567890.000030",
+                "thread_ts": "1234567890.000010"
+            }
+        });
+        assert!(
+            SlackChannel::extract_event_message(&payload, "BXXX").is_none(),
+            "message event for @mention thread reply should be skipped (app_mention handles it)"
+        );
     }
 
     // ── Send body building (tests actual build_send_body) ─────────
@@ -1916,10 +2028,22 @@ mod tests {
         // The format is "[block_action:{id}] {safe_value}".
         // Split on the closing "] " to isolate the value portion.
         let value_part = msg.content.splitn(2, "] ").nth(1).unwrap_or("");
-        assert!(!value_part.contains('['), "[ must be stripped from button value");
-        assert!(!value_part.contains(']'), "] must be stripped from button value");
-        assert!(value_part.contains("injected"), "text content must survive stripping");
-        assert!(value_part.contains("value"), "text content must survive stripping");
+        assert!(
+            !value_part.contains('['),
+            "[ must be stripped from button value"
+        );
+        assert!(
+            !value_part.contains(']'),
+            "] must be stripped from button value"
+        );
+        assert!(
+            value_part.contains("injected"),
+            "text content must survive stripping"
+        );
+        assert!(
+            value_part.contains("value"),
+            "text content must survive stripping"
+        );
     }
 
     #[tokio::test]
@@ -2151,7 +2275,8 @@ mod tests {
             envelope_type: "events_api".to_string(),
             payload: serde_json::json!({
                 "event": {
-                    "type": "message",
+                    // Use app_mention so it routes correctly for channel events.
+                    "type": "app_mention",
                     "user": user,
                     "text": text,
                     "channel": channel,
@@ -2165,9 +2290,12 @@ mod tests {
     async fn dispatch_envelope_events_api_forwards_message() {
         let ch = wildcard_channel();
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        // Use app_mention in a channel — should be forwarded.
         let env = events_api_envelope("U123", "C456", "1234567890.000001", "hello");
         ch.dispatch_envelope(env, "BBOT", None, &tx).await.unwrap();
-        let msg = rx.try_recv().expect("events_api message should be forwarded");
+        let msg = rx
+            .try_recv()
+            .expect("events_api app_mention should be forwarded");
         assert_eq!(msg.sender, "U123");
         assert_eq!(msg.content, "hello");
         assert_eq!(msg.reply_target, "C456");
@@ -2218,7 +2346,9 @@ mod tests {
             }),
         };
         ch.dispatch_envelope(env, "BBOT", None, &tx).await.unwrap();
-        let msg = rx.try_recv().expect("block_action confirm should be forwarded");
+        let msg = rx
+            .try_recv()
+            .expect("block_action confirm should be forwarded");
         assert!(msg.content.contains("confirm_issue"));
     }
 

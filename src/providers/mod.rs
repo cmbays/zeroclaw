@@ -2770,7 +2770,10 @@ mod tests {
     fn scrub_xoxs_socket_mode_token() {
         let input = "auth error: xoxs-1-abc123def456ghi789";
         let result = scrub_secret_patterns(input);
-        assert!(!result.contains("xoxs-1-abc123"), "xoxs- token must be redacted");
+        assert!(
+            !result.contains("xoxs-1-abc123"),
+            "xoxs- token must be redacted"
+        );
         assert!(result.contains("[REDACTED]"));
     }
 
@@ -2778,7 +2781,10 @@ mod tests {
     fn scrub_xoxe_exported_token() {
         let input = "token xoxe-2-abc123def456 in request";
         let result = scrub_secret_patterns(input);
-        assert!(!result.contains("xoxe-2-abc123"), "xoxe- token must be redacted");
+        assert!(
+            !result.contains("xoxe-2-abc123"),
+            "xoxe- token must be redacted"
+        );
         assert!(result.contains("[REDACTED]"));
     }
 

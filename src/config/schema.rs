@@ -200,6 +200,13 @@ pub struct Config {
     #[serde(default)]
     pub modes: HashMap<String, ModeConfig>,
 
+    /// Tool allowlist: if non-empty, only the named tools are offered to the model.
+    /// Useful for constrained deployments or when the model struggles with many tools.
+    /// Default: empty (all registered tools are offered).
+    /// Example: `tool_allowlist = ["linear", "memory_store", "memory_recall"]`
+    #[serde(default)]
+    pub tool_allowlist: Vec<String>,
+
     /// Linear integration configuration (`[linear]`).
     /// Defaults: `enabled=false`, `api_key=None`, `team_id=None`.
     /// Compatibility: omitting the `[linear]` section is safe — defaults apply.
@@ -291,6 +298,14 @@ pub struct ModeConfig {
     /// Response policy text injected into system prompt.
     #[serde(default)]
     pub response_policy: Option<String>,
+    /// Tools available in this mode. If non-empty, only these tools are offered to the model.
+    /// Falls back to the global `tool_allowlist` when empty; if that is also empty, all tools.
+    #[serde(default)]
+    pub tool_allowlist: Vec<String>,
+    /// Temperature override for this mode (0.0–2.0). Overrides `default_temperature` when set.
+    /// Lower values (e.g. 0.1) reduce hallucination; higher values (e.g. 1.2) increase creativity.
+    #[serde(default)]
+    pub temperature: Option<f64>,
 }
 
 // ── Linear Config ────────────────────────────────────────────────
@@ -3543,6 +3558,7 @@ impl Default for Config {
             peripherals: PeripheralsConfig::default(),
             agents: HashMap::new(),
             modes: HashMap::new(),
+            tool_allowlist: Vec::new(),
             linear: LinearConfig::default(),
             hooks: HooksConfig::default(),
             hardware: HardwareConfig::default(),
@@ -4825,6 +4841,7 @@ default_temperature = 0.7
             peripherals: PeripheralsConfig::default(),
             agents: HashMap::new(),
             modes: HashMap::new(),
+            tool_allowlist: Vec::new(),
             linear: LinearConfig::default(),
             hooks: HooksConfig::default(),
             hardware: HardwareConfig::default(),
@@ -5001,6 +5018,7 @@ tool_dispatcher = "xml"
             peripherals: PeripheralsConfig::default(),
             agents: HashMap::new(),
             modes: HashMap::new(),
+            tool_allowlist: Vec::new(),
             linear: LinearConfig::default(),
             hooks: HooksConfig::default(),
             hardware: HardwareConfig::default(),

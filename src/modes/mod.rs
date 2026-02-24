@@ -11,6 +11,11 @@ pub struct ModeDefinition {
     pub system_prompt: String,
     /// Visual identity override for outbound messages.
     pub visual_identity: Option<VisualIdentityConfig>,
+    /// Tool allowlist for this mode. If non-empty, only these tools are offered to the model.
+    /// Empty means "use global allowlist or all tools".
+    pub tool_allowlist: Vec<String>,
+    /// Temperature override for this mode. None means use the global default_temperature.
+    pub temperature: Option<f64>,
 }
 
 /// Registry of configured modes, built once at startup.
@@ -114,6 +119,8 @@ impl ModeRegistry {
                 ModeDefinition {
                     system_prompt: prompt,
                     visual_identity: mode_config.visual_identity.clone(),
+                    tool_allowlist: mode_config.tool_allowlist.clone(),
+                    temperature: mode_config.temperature,
                 },
             );
         }
@@ -275,7 +282,12 @@ mod tests {
 
     fn write_workspace_files(dir: &std::path::Path) {
         for name in &[
-            "SOUL.md", "IDENTITY.md", "USER.md", "AGENTS.md", "TOOLS.md", "HEARTBEAT.md",
+            "SOUL.md",
+            "IDENTITY.md",
+            "USER.md",
+            "AGENTS.md",
+            "TOOLS.md",
+            "HEARTBEAT.md",
             "MEMORY.md",
         ] {
             std::fs::write(dir.join(name), "# Test").unwrap();
@@ -289,6 +301,8 @@ mod tests {
             skills_dir: None,
             visual_identity: None,
             response_policy: None,
+            tool_allowlist: Vec::new(),
+            temperature: None,
         }
     }
 
@@ -338,6 +352,8 @@ mod tests {
                 skills_dir: None,
                 visual_identity: None,
                 response_policy: None,
+                tool_allowlist: Vec::new(),
+                temperature: None,
             },
         );
         let result = build_registry(&config);

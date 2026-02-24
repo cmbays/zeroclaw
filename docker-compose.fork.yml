@@ -1,19 +1,27 @@
 # ZeroClaw Fork — Docker Compose Stack
 #
-# Three services:
-#   1. zeroclaw: The fork binary (built from source, dev target)
-#   2. ollama:   Local LLM server (Qwen 3 14B)
-#   3. tunnel:   Cloudflare Tunnel for Linear/GitHub webhooks
+# One service:
+#   zeroclaw: The fork binary (built from source, dev target)
 #
-# Usage:
-#   docker compose -f docker-compose.fork.yml up -d
-#   docker compose -f docker-compose.fork.yml logs -f zeroclaw
+# Ollama runs on the HOST (not in Docker) so it can use Apple Silicon GPU (Metal).
+# Install: brew install ollama && brew services start ollama
+# Pull model: ollama pull qwen3:4b
 #
-# First-time Ollama setup:
-#   docker compose -f docker-compose.fork.yml exec ollama ollama pull qwen3:14b
+# Inbound webhook traffic (Linear/GitHub) is routed via Tailscale Funnel on the host.
+# Tailscale routes public HTTPS traffic → host port 8080 → zeroclaw container.
+#
+# Quick start:
+#   1. Install Tailscale and enable Funnel (see README or docs/planning/):
+#        tailscale funnel --bg 8080
+#      Copy the public URL (https://<host>.<tailnet>.ts.net) for the Linear webhook.
+#   2. brew install ollama && brew services start ollama && ollama pull qwen3:4b
+#   3. cp config/config.example.toml config/config.toml
+#      # fill in bot_token, app_token, linear.api_key, webhook_signing_secret, etc.
+#   4. docker compose -f docker-compose.fork.yml up -d
 
 services:
-  # ── ZeroClaw Agent ──
+
+  # ── ZeroClaw Agent ──────────────────────────────────────────────────────────
   zeroclaw:
     build:
       context: .
@@ -21,58 +29,66 @@ services:
       target: dev
     container_name: zeroclaw-fork
     restart: unless-stopped
+
+    # Run in daemon mode: starts gateway + Slack Socket Mode + webhook server.
+    command: ["daemon"]
+
+    # Override Dockerfile ENV defaults so the config.toml values take effect.
     environment:
-      - ZEROCLAW_GATEWAY_PORT=42617
-      # Ollama URL (container networking, not host.docker.internal)
+      - ZEROCLAW_MODEL=qwen3:4b
       - PROVIDER=ollama
-      - ZEROCLAW_MODEL=qwen3:14b
-    env_file:
-      - .env
+      # Disable qwen3's extended thinking mode — it adds 1-3 min of internal
+      # chain-of-thought reasoning before every response, making the bot unusably slow.
+      - ZEROCLAW_REASONING_ENABLED=false
+      - RUST_LOG=zeroclaw=debug
+
+    # Slack/Linear secrets live in config/config.toml (bind-mounted below).
     volumes:
-      - zeroclaw-config:/zeroclaw-data/.zeroclaw
+      # Fork config (bind-mount): copy config/config.example.toml → config/config.toml
+      # and fill in real secrets before starting.
+      - ./config/config.toml:/zeroclaw-data/.zeroclaw/config.toml:ro
+      # Named volume first so the bind mount below takes precedence for modes/.
       - zeroclaw-workspace:/zeroclaw-data/workspace
+      # PM persona files: aieos_path and skills_dir resolve relative to workspace_dir.
+      # Bind-mounted after the named volume so it shadows the workspace/modes/ path.
+      - ./modes:/zeroclaw-data/workspace/modes:ro
+
+    # Port 8080 is bound to localhost only so Tailscale Funnel (running on the host)
+    # can route inbound webhook traffic to it. Not exposed to the wider network.
+    # Port 42617 (gateway) stays internal — used only for the Docker healthcheck.
+    expose:
+      - "42617"  # ZeroClaw gateway (internal healthcheck target)
     ports:
-      - "127.0.0.1:42617:42617"
-    depends_on:
-      ollama:
-        condition: service_started
+      - "127.0.0.1:8080:8080"  # webhook listener — Tailscale Funnel → host:8080 → container
+
+    # extra_hosts lets the container resolve host.docker.internal → host IP,
+    # so api_url = "http://host.docker.internal:11434" in config.toml reaches
+    # the Ollama service running natively on the Mac (with Metal GPU).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
     networks:
       - fork-net
 
-  # ── Ollama LLM Server ──
-  ollama:
-    image: ollama/ollama:latest
-    container_name: zeroclaw-ollama
-    restart: unless-stopped
-    volumes:
-      - ollama-models:/root/.ollama
-    ports:
-      - "127.0.0.1:11434:11434"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:42617/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
     deploy:
       resources:
+        limits:
+          cpus: '2'
+          memory: 1G
         reservations:
-          memory: 10G
-    networks:
-      - fork-net
-
-  # ── Cloudflare Tunnel (Linear/GitHub webhooks) ──
-  tunnel:
-    image: cloudflare/cloudflared:latest
-    container_name: zeroclaw-tunnel
-    restart: unless-stopped
-    command: tunnel --no-autoupdate run
-    environment:
-      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN:-}
-    depends_on:
-      - zeroclaw
-    networks:
-      - fork-net
+          cpus: '0.25'
+          memory: 256M
 
 networks:
   fork-net:
     driver: bridge
 
 volumes:
-  zeroclaw-config:
   zeroclaw-workspace:
-  ollama-models:
