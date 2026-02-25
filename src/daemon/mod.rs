@@ -429,6 +429,7 @@ mod tests {
             allowed_users: vec!["*".into()],
             thread_replies: Some(true),
             mention_only: Some(false),
+            thread_ttl_minutes: None,
         });
         assert!(has_supervised_channels(&config));
     }
