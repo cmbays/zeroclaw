@@ -1,5 +1,0 @@
-[skill]
-name = "pm-core"
-description = "Core PM mode skill placeholder for future PM-specific tool definitions"
-version = "0.1.0"
-tags = ["pm", "project-management"]

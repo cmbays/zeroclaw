@@ -1,98 +1,62 @@
-# ZeroClaw Fork — Configuration Example
+# ZeroClaw Fork — Single-bot Configuration Example
 #
-# Copy to config/config.toml and fill in your real values.
+# For the multi-bot Mattermost hub, use the per-bot config files instead:
+#   config/sokka.example.toml, config/katara.example.toml, etc.
+#
+# This file shows the general single-bot pattern (upstream style).
+# Copy to config/config.toml and fill in your values.
 # config/config.toml is gitignored — never commit real secrets.
-#
-# Usage:
-#   cp config/config.example.toml config/config.toml
-#   # edit config/config.toml with real tokens
-#   docker compose -f docker-compose.fork.yml up -d
 
 workspace_dir       = "/zeroclaw-data/workspace"
 config_path         = "/zeroclaw-data/.zeroclaw/config.toml"
 
-# Ollama base URL. host.docker.internal resolves to the Mac host from inside the container,
-# where Ollama runs natively with Metal GPU acceleration.
+# Ollama base URL. host.docker.internal resolves to the Mac host from inside the container.
 # Change to http://localhost:11434 for local runs outside Docker.
 api_url             = "http://host.docker.internal:11434"
 default_provider    = "ollama"
-default_model       = "llama3.2:3b"
-default_temperature = 0.7
+default_model       = "qwen3:14b"
+default_temperature = 0.5
 
-# Global tool ceiling — empty means all tools allowed to all modes.
-# Per-mode allowlists (under [modes.<name>]) override this per-message.
+# Tool ceiling — empty means all registered tools are offered.
 tool_allowlist = []
+
+# ── Identity ────────────────────────────────────────────────────────────────────
+# Each bot process has one identity. Point to the bot's AIEOS JSON file.
+
+[identity]
+format     = "aieos"
+aieos_path = "modes/sokka/identity.json"
+
+# ── Memory ──────────────────────────────────────────────────────────────────────
+# Each bot gets its own SQLite file for personal working memory.
+# Mattermost channel history serves as shared team memory.
+
+[memory]
+backend     = "sqlite"
+sqlite_path = "~/.zeroclaw/sokka.db"
+
+# ── Gateway ─────────────────────────────────────────────────────────────────────
 
 [gateway]
 port              = 42617
 host              = "[::]"
 allow_public_bind = true
 
-# ── Channels ───────────────────────────────────────────────────────────────────
+# ── Channels ────────────────────────────────────────────────────────────────────
 
 [channels_config]
-# Required. Enables or disables the interactive CLI channel.
-# Set to false when running headless (daemon/Docker).
 cli = false
 
-[channels_config.slack]
-# Bot Token (xoxb-...) — Slack app → OAuth & Permissions → Bot User OAuth Token.
-bot_token = "xoxb-REPLACE_ME"
+[channels_config.mattermost]
+url           = "http://localhost:8065"
+bot_token     = "REPLACE_WITH_BOT_TOKEN"
+allowed_users = ["*"]
+thread_replies = true
+mention_only   = true
 
-# App-Level Token (xapp-...) — Slack app → Basic Information → App-Level Tokens.
-# Requires the connections:write scope. Used for Socket Mode WebSocket connection.
-app_token = "xapp-REPLACE_ME"
-
-# Optional: restrict the bot to specific channel IDs.
-# channel_allowlist = ["C01234ABCDE", "C09876ZYXWV"]
-
-# ── Linear ─────────────────────────────────────────────────────────────────────
+# ── Linear ──────────────────────────────────────────────────────────────────────
 
 [linear]
-enabled = true
-
-# OAuth app token — Linear → Settings → API → OAuth Applications → your app → Developer token → App token.
-# Use an app token (not a user token) so actions are attributed to the integration, not your personal account.
-# Token expires after ~30 days; regenerate from the same page and update this value.
-api_key = "lin_oauth_REPLACE_ME"
-
-# Default team ID — visible in your Linear team URL:
-#   https://linear.app/<workspace>/team/<team-id>/...
-team_id = "REPLACE_ME"
-
-# Port the axum webhook server binds to inside the container.
-# cloudflared routes https://<your-subdomain> → http://zeroclaw-fork:<webhook_port>
-webhook_port = 8080
-
-# HMAC signing secret — Linear → Settings → API → Webhooks → your webhook → signing secret.
-webhook_signing_secret = "REPLACE_ME"
-
-# Optional: GitHub webhook signing secret.
-# Set to accept and verify GitHub PR events; omit to accept all GitHub requests.
-# github_webhook_signing_secret = "REPLACE_ME"
-
-# Bind address inside the container. 0.0.0.0 is correct for Docker Compose.
-webhook_bind = "0.0.0.0"
-
-# ── PM Mode ────────────────────────────────────────────────────────────────────
-
-[modes.pm]
-identity_format = "aieos"
-
-# Path is relative to workspace_dir (/zeroclaw-data/workspace).
-# docker-compose.fork.yml mounts ./modes → /zeroclaw-data/workspace/modes
-aieos_path = "modes/pm/identity.json"
-skills_dir = "modes/pm/skills"
-
-response_policy = "Respond only when directly @mentioned or when a user sends a DM. In all other cases, stay silent. Keep replies concise and action-oriented."
-
-# Tools available in PM mode. Small models (≤3B) reliably use tools when
-# given a focused set; 20+ tools causes fallback to text generation.
-# Add more modes below (e.g. [modes.dev]) with their own tool_allowlist.
-tool_allowlist = ["linear", "memory_store", "memory_recall", "memory_forget"]
-# Per-mode temperature override. Lower = less hallucination. Higher = more creative.
-# temperature = 0.1
-
-[modes.pm.visual_identity]
-username   = "ZeroClaw PM"
-icon_emoji = ":robot_face:"
+enabled = false
+# api_key = "lin_oauth_REPLACE_ME"
+# team_id = "REPLACE_ME"

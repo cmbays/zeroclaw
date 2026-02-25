@@ -2718,7 +2718,6 @@ fn collect_configured_channels(
             display_name: "Slack",
             channel: Arc::new(SlackChannel::new(
                 sl.bot_token.clone(),
-                sl.app_token.clone(),
                 sl.channel_id.clone(),
                 sl.allowed_users.clone(),
             )),
