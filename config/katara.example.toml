@@ -1,0 +1,28 @@
+# ZeroClaw — Katara (PM Bot) config
+# Usage: zeroclaw start --config config/katara.toml
+# Bot token: source .envrc.mattermost && echo $MM_TOKEN_KATARA
+
+default_provider = "ollama"
+default_model = "qwen3:14b"
+api_key = "http://localhost:11434"
+default_temperature = 0.1
+
+tool_allowlist = ["linear", "memory_store", "memory_recall", "memory_forget", "ask_user"]
+
+[identity]
+format = "aieos"
+aieos_path = "modes/katara/identity.json"
+
+[memory]
+backend = "sqlite"
+sqlite_path = "~/.zeroclaw/katara.db"
+
+[channels_config]
+cli = false
+
+[channels_config.mattermost]
+url = "http://localhost:8065"
+bot_token = "REPLACE_WITH_MM_TOKEN_KATARA"
+allowed_users = ["*"]
+thread_replies = true
+mention_only = true
