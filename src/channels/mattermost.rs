@@ -75,6 +75,10 @@ pub struct MattermostChannel {
     thread_state: ThreadActivityState,
     /// Handle for the background typing-indicator loop (aborted on stop_typing).
     typing_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Path to the AIEOS identity JSON file, used for startup profile sync.
+    aieos_path: Option<String>,
+    /// When true (default), sync display name, description, and avatar at startup.
+    sync_profile: bool,
 }
 
 impl MattermostChannel {
@@ -86,6 +90,8 @@ impl MattermostChannel {
         thread_replies: bool,
         mention_only: bool,
         thread_ttl_minutes: u32,
+        aieos_path: Option<String>,
+        sync_profile: bool,
     ) -> Self {
         // Ensure base_url doesn't have a trailing slash for consistent path joining
         let base_url = base_url.trim_end_matches('/').to_string();
@@ -98,6 +104,8 @@ impl MattermostChannel {
             mention_only,
             thread_state: ThreadActivityState::new(thread_ttl_minutes),
             typing_handle: Mutex::new(None),
+            aieos_path,
+            sync_profile,
         }
     }
 
@@ -146,6 +154,157 @@ impl MattermostChannel {
             );
         }
         (id, username)
+    }
+
+    /// Sync bot profile (display name, description, avatar) from the AIEOS identity file.
+    ///
+    /// Called once at startup after `get_bot_identity()` succeeds. Warns on permission
+    /// failures (403) but never crashes — profile sync is best-effort.
+    async fn sync_mattermost_profile(&self, bot_user_id: &str) {
+        if !self.sync_profile {
+            return;
+        }
+        let Some(ref aieos_path) = self.aieos_path else {
+            return;
+        };
+
+        let identity_json: serde_json::Value = match std::fs::read_to_string(aieos_path)
+            .map_err(anyhow::Error::from)
+            .and_then(|s| serde_json::from_str(&s).map_err(Into::into))
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("Mattermost: profile sync skipped — cannot read {aieos_path}: {e}");
+                return;
+            }
+        };
+
+        let identity = &identity_json["identity"];
+        let display_name = identity["names"]["first"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        let description: String = identity["bio"]
+            .as_str()
+            .unwrap_or("")
+            .chars()
+            .take(128)
+            .collect();
+
+        if !display_name.is_empty() || !description.is_empty() {
+            let body = serde_json::json!({
+                "display_name": display_name,
+                "description": description,
+            });
+            match self
+                .http_client()
+                .put(format!("{}/api/v4/bots/{bot_user_id}", self.base_url))
+                .bearer_auth(&self.bot_token)
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    tracing::info!("Mattermost: synced profile display_name={display_name:?}");
+                }
+                Ok(resp) if resp.status() == reqwest::StatusCode::FORBIDDEN => {
+                    tracing::warn!(
+                        "Mattermost: profile sync skipped — bot lacks manage_bots permission \
+                         (status {}). Grant the permission or set sync_profile = false.",
+                        resp.status()
+                    );
+                }
+                Ok(resp) => {
+                    tracing::warn!("Mattermost: profile sync failed (status {})", resp.status());
+                }
+                Err(e) => {
+                    tracing::warn!("Mattermost: profile sync request failed: {e}");
+                }
+            }
+        }
+
+        // Avatar resolution: local avatar.png in same directory first, then avatar_url.
+        let avatar_dir = std::path::Path::new(aieos_path)
+            .parent()
+            .map(|p| p.to_path_buf());
+        let avatar_url = identity["avatar_url"].as_str().map(str::to_string);
+
+        let avatar: Option<(Vec<u8>, &'static str)> = 'resolve: {
+            if let Some(ref dir) = avatar_dir {
+                let local = dir.join("avatar.png");
+                if let Ok(bytes) = std::fs::read(&local) {
+                    tracing::debug!("Mattermost: using local avatar {}", local.display());
+                    break 'resolve Some((bytes, "image/png"));
+                }
+            }
+            if let Some(ref url) = avatar_url {
+                // Strip query string before checking extension (URLs often have ?cb= suffixes).
+                let path = url.split('?').next().unwrap_or(url);
+                let content_type: &'static str = if path.ends_with(".png") {
+                    "image/png"
+                } else {
+                    "image/jpeg"
+                };
+                const MAX_AVATAR_BYTES: u64 = 10 * 1024 * 1024; // 10 MB
+                match self.http_client().get(url).send().await {
+                    Ok(resp) if resp.status().is_success() => {
+                        if resp.content_length().is_some_and(|n| n > MAX_AVATAR_BYTES) {
+                            tracing::warn!("Mattermost: avatar too large, skipping");
+                        } else {
+                            match resp.bytes().await {
+                                Ok(b) => break 'resolve Some((b.to_vec(), content_type)),
+                                Err(e) => {
+                                    tracing::warn!("Mattermost: avatar fetch body failed: {e}");
+                                }
+                            }
+                        }
+                    }
+                    Ok(resp) => {
+                        tracing::warn!(
+                            "Mattermost: avatar fetch failed (status {})",
+                            resp.status()
+                        );
+                    }
+                    Err(e) => tracing::warn!("Mattermost: avatar fetch failed: {e}"),
+                }
+            }
+            None
+        };
+
+        if let Some((bytes, content_type)) = avatar {
+            let part = reqwest::multipart::Part::bytes(bytes)
+                .file_name("avatar.png")
+                .mime_str(content_type)
+                .expect("image/png and image/jpeg are valid MIME types");
+            let form = reqwest::multipart::Form::new().part("image", part);
+            match self
+                .http_client()
+                .post(format!(
+                    "{}/api/v4/users/{bot_user_id}/image",
+                    self.base_url
+                ))
+                .bearer_auth(&self.bot_token)
+                .multipart(form)
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    tracing::info!("Mattermost: synced avatar for {display_name:?}");
+                }
+                Ok(resp) if resp.status() == reqwest::StatusCode::FORBIDDEN => {
+                    tracing::warn!(
+                        "Mattermost: avatar sync skipped — insufficient permissions (status {})",
+                        resp.status()
+                    );
+                }
+                Ok(resp) => {
+                    tracing::warn!("Mattermost: avatar sync failed (status {})", resp.status());
+                }
+                Err(e) => {
+                    tracing::warn!("Mattermost: avatar sync request failed: {e}");
+                }
+            }
+        }
     }
 }
 
@@ -198,6 +357,9 @@ impl Channel for MattermostChannel {
 
     async fn listen(&self, tx: tokio::sync::mpsc::Sender<ChannelMessage>) -> Result<()> {
         let (bot_user_id, bot_username) = self.get_bot_identity().await;
+        if !bot_user_id.is_empty() {
+            self.sync_mattermost_profile(&bot_user_id).await;
+        }
         match self
             .listen_websocket(&tx, &bot_user_id, &bot_username)
             .await
@@ -765,6 +927,8 @@ mod tests {
             thread_replies,
             false,
             30,
+            None,
+            false,
         )
     }
 
@@ -778,6 +942,8 @@ mod tests {
             true,
             true,
             30,
+            None,
+            false,
         )
     }
 
@@ -791,6 +957,8 @@ mod tests {
             false,
             false,
             30,
+            None,
+            false,
         );
         assert_eq!(ch.base_url, "https://mm.example.com");
     }
@@ -1233,6 +1401,8 @@ mod tests {
             false,
             false,
             30,
+            None,
+            false,
         );
         assert_eq!(ch.websocket_url(), "wss://mm.example.com/api/v4/websocket");
     }
@@ -1247,6 +1417,8 @@ mod tests {
             false,
             false,
             30,
+            None,
+            false,
         );
         assert_eq!(ch.websocket_url(), "ws://localhost:8065/api/v4/websocket");
     }
@@ -1261,6 +1433,8 @@ mod tests {
             false,
             false,
             30,
+            None,
+            false,
         );
         // Trailing slash stripped in new(), so conversion is clean
         assert_eq!(ch.websocket_url(), "wss://mm.example.com/api/v4/websocket");
@@ -1326,6 +1500,8 @@ mod tests {
             false,
             false,
             30,
+            None,
+            false,
         );
         let post_json = r#"{"id":"post1","user_id":"user1","message":"hello","create_at":1600000000001,"root_id":""}"#;
 
@@ -1427,8 +1603,17 @@ mod tests {
     #[test]
     fn parse_ws_posted_event_unauthorized_user_returns_none() {
         // Allowlist is empty — all users denied.
-        let ch =
-            MattermostChannel::new("url".into(), "token".into(), None, vec![], false, false, 30);
+        let ch = MattermostChannel::new(
+            "url".into(),
+            "token".into(),
+            None,
+            vec![],
+            false,
+            false,
+            30,
+            None,
+            false,
+        );
         let post_json = r#"{"id":"post1","user_id":"user1","message":"hello","create_at":1600000000001,"root_id":""}"#;
         let event = make_ws_event("chan1", post_json);
         assert!(ch
@@ -1461,6 +1646,8 @@ mod tests {
             false,
             false,
             30,
+            None,
+            false,
         );
         assert_eq!(ch.websocket_url(), "wss://mm.example.com/api/v4/websocket");
     }
@@ -1595,6 +1782,8 @@ mod tests {
             true,
             true,
             30,
+            None,
+            false,
         );
 
         // Authorized user activates the thread.

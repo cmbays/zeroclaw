@@ -10,7 +10,7 @@ tool_allowlist = ["shell", "file_read", "http_request", "ask_user"]
 
 [identity]
 format = "aieos"
-aieos_path = "modes/toph/identity.json"
+aieos_path = "identities/toph/identity.json"
 
 [memory]
 backend = "sqlite"

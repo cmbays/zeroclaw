@@ -11,7 +11,7 @@ tool_allowlist = ["linear", "memory_store", "memory_recall", "memory_forget", "a
 
 [identity]
 format = "aieos"
-aieos_path = "modes/katara/identity.json"
+aieos_path = "identities/katara/identity.json"
 
 [memory]
 backend = "sqlite"

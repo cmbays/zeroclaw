@@ -2735,6 +2735,8 @@ fn collect_configured_channels(
                 mm.thread_replies.unwrap_or(true),
                 mm.mention_only.unwrap_or(false),
                 mm.thread_ttl_minutes.unwrap_or(30),
+                config.identity.aieos_path.clone(),
+                mm.sync_profile.unwrap_or(true),
             )),
         });
     }
@@ -6225,6 +6227,7 @@ This is an example JSON object for profile settings."#;
             thread_replies: Some(true),
             mention_only: Some(false),
             thread_ttl_minutes: None,
+            sync_profile: None,
         });
 
         let channels = collect_configured_channels(&config, "test");
