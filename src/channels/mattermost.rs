@@ -88,6 +88,12 @@ impl MattermostChannel {
             .and_then(|u| u.as_str())
             .unwrap_or("")
             .to_string();
+        if id.is_empty() || username.is_empty() {
+            tracing::warn!(
+                "Mattermost: failed to fetch bot identity — \
+                 self-message filtering and mention detection may be impaired"
+            );
+        }
         (id, username)
     }
 }
@@ -154,6 +160,10 @@ impl Channel for MattermostChannel {
                     );
                     self.listen_polling(&tx, &bot_user_id, &bot_username).await
                 } else {
+                    tracing::error!(
+                        "Mattermost WebSocket failed after {WS_MAX_RECONNECT} attempts \
+                         and no channel_id is configured for polling fallback: {e}"
+                    );
                     Err(e)
                 }
             }
@@ -264,14 +274,30 @@ impl MattermostChannel {
         for _ in 0..5u8 {
             match read.next().await {
                 Some(Ok(Message::Text(t))) => {
-                    let v: serde_json::Value = serde_json::from_str(t.as_ref()).unwrap_or_default();
-                    if v.get("status").and_then(|s| s.as_str()) == Some("OK") {
-                        authed = true;
-                        break;
+                    let v: serde_json::Value = match serde_json::from_str(t.as_ref()) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            tracing::debug!(
+                                "Mattermost WebSocket: non-JSON frame during auth: {e}"
+                            );
+                            continue;
+                        }
+                    };
+                    match v.get("status").and_then(|s| s.as_str()) {
+                        Some("OK") => {
+                            authed = true;
+                            break;
+                        }
+                        Some(status) => {
+                            bail!("Mattermost WebSocket auth rejected by server: status={status}");
+                        }
+                        None => {} // Not a status response — hello event or similar, keep reading.
                     }
                 }
+                Some(Ok(Message::Close(_))) | None => {
+                    bail!("Mattermost WebSocket closed during auth")
+                }
                 Some(Err(e)) => bail!("Mattermost WebSocket error during auth: {e}"),
-                None => bail!("Mattermost WebSocket closed during auth"),
                 _ => {}
             }
         }
@@ -285,7 +311,12 @@ impl MattermostChannel {
                 Some(Ok(Message::Text(t))) => {
                     let event: serde_json::Value = match serde_json::from_str(t.as_ref()) {
                         Ok(v) => v,
-                        Err(_) => continue,
+                        Err(e) => {
+                            tracing::debug!(
+                                "Mattermost WebSocket: non-JSON event frame (skipping): {e}"
+                            );
+                            continue;
+                        }
                     };
                     if event.get("event").and_then(|e| e.as_str()) != Some("posted") {
                         continue;
@@ -328,10 +359,10 @@ impl MattermostChannel {
                 Ok(()) => return Ok(()),
                 Err(e) => {
                     attempts += 1;
-                    if attempts > WS_MAX_RECONNECT {
+                    if attempts >= WS_MAX_RECONNECT {
                         return Err(e);
                     }
-                    let shift = (attempts - 1).min(5);
+                    let shift = (attempts - 1).min(6);
                     let delay = (WS_BASE_BACKOFF_SECS << shift).min(WS_MAX_BACKOFF_SECS);
                     tracing::warn!(
                         "Mattermost WebSocket error (attempt {attempts}/{WS_MAX_RECONNECT}): \
@@ -437,7 +468,15 @@ impl MattermostChannel {
 
         // "post" is a JSON-encoded string — parse twice.
         let post_str = data.get("post").and_then(|p| p.as_str())?;
-        let post: serde_json::Value = serde_json::from_str(post_str).ok()?;
+        let post: serde_json::Value = match serde_json::from_str(post_str) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    "Mattermost WebSocket: failed to parse double-encoded post body: {e}"
+                );
+                return None;
+            }
+        };
 
         // Prefer channel_id from broadcast, fall back to the post body.
         let event_channel_id = broadcast
@@ -1285,5 +1324,59 @@ mod tests {
 
         let msg = ch.parse_ws_posted_event(&event, "bot123", "mybot").unwrap();
         assert_eq!(msg.content, "do the thing");
+    }
+
+    #[test]
+    fn parse_ws_posted_event_both_channel_ids_missing_returns_none() {
+        // If both broadcast.channel_id and post.channel_id are absent, return None.
+        let ch = make_channel(vec!["*".into()], false);
+        let post_json = r#"{"id":"post1","user_id":"user1","message":"hi","create_at":1600000000001,"root_id":""}"#;
+        let event = json!({
+            "event": "posted",
+            "data": { "post": post_json },
+            "broadcast": {}
+        });
+        assert!(ch
+            .parse_ws_posted_event(&event, "bot123", "mybot")
+            .is_none());
+    }
+
+    #[test]
+    fn parse_ws_posted_event_unauthorized_user_returns_none() {
+        // Allowlist is empty — all users denied.
+        let ch = MattermostChannel::new("url".into(), "token".into(), None, vec![], false, false);
+        let post_json = r#"{"id":"post1","user_id":"user1","message":"hello","create_at":1600000000001,"root_id":""}"#;
+        let event = make_ws_event("chan1", post_json);
+        assert!(ch
+            .parse_ws_posted_event(&event, "bot123", "mybot")
+            .is_none());
+    }
+
+    #[test]
+    fn parse_ws_posted_event_invalid_post_json_returns_none() {
+        // The inner "post" field is not valid JSON — parse_ws_posted_event returns None.
+        let ch = make_channel(vec!["*".into()], false);
+        let event = json!({
+            "event": "posted",
+            "data": { "post": "not valid json {{" },
+            "broadcast": { "channel_id": "chan1" }
+        });
+        assert!(ch
+            .parse_ws_posted_event(&event, "bot123", "mybot")
+            .is_none());
+    }
+
+    #[test]
+    fn websocket_url_no_scheme_defaults_to_wss() {
+        // A base_url without a recognized scheme falls back to wss://.
+        let ch = MattermostChannel::new(
+            "mm.example.com".into(),
+            "token".into(),
+            None,
+            vec![],
+            false,
+            false,
+        );
+        assert_eq!(ch.websocket_url(), "wss://mm.example.com/api/v4/websocket");
     }
 }
