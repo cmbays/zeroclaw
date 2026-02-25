@@ -238,16 +238,27 @@ impl MattermostChannel {
                 }
             }
             if let Some(ref url) = avatar_url {
-                let content_type: &'static str = if url.ends_with(".png") {
+                // Strip query string before checking extension (URLs often have ?cb= suffixes).
+                let path = url.split('?').next().unwrap_or(url);
+                let content_type: &'static str = if path.ends_with(".png") {
                     "image/png"
                 } else {
                     "image/jpeg"
                 };
+                const MAX_AVATAR_BYTES: u64 = 10 * 1024 * 1024; // 10 MB
                 match self.http_client().get(url).send().await {
-                    Ok(resp) if resp.status().is_success() => match resp.bytes().await {
-                        Ok(b) => break 'resolve Some((b.to_vec(), content_type)),
-                        Err(e) => tracing::warn!("Mattermost: avatar fetch body failed: {e}"),
-                    },
+                    Ok(resp) if resp.status().is_success() => {
+                        if resp.content_length().is_some_and(|n| n > MAX_AVATAR_BYTES) {
+                            tracing::warn!("Mattermost: avatar too large, skipping");
+                        } else {
+                            match resp.bytes().await {
+                                Ok(b) => break 'resolve Some((b.to_vec(), content_type)),
+                                Err(e) => {
+                                    tracing::warn!("Mattermost: avatar fetch body failed: {e}");
+                                }
+                            }
+                        }
+                    }
                     Ok(resp) => {
                         tracing::warn!(
                             "Mattermost: avatar fetch failed (status {})",
