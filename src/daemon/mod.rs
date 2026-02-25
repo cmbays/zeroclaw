@@ -340,7 +340,6 @@ mod tests {
             allowed_users: vec!["*".into()],
             thread_replies: Some(true),
             mention_only: Some(false),
-            mode: None,
         });
         assert!(has_supervised_channels(&config));
     }

@@ -165,7 +165,6 @@ pub async fn run_wizard(force: bool) -> Result<Config> {
         cost: crate::config::CostConfig::default(),
         peripherals: crate::config::PeripheralsConfig::default(),
         agents: std::collections::HashMap::new(),
-        modes: std::collections::HashMap::new(),
         linear: crate::config::LinearConfig::default(),
         hooks: crate::config::HooksConfig::default(),
         hardware: hardware_config,
@@ -516,7 +515,6 @@ async fn run_quick_setup_with_home(
         cost: crate::config::CostConfig::default(),
         peripherals: crate::config::PeripheralsConfig::default(),
         agents: std::collections::HashMap::new(),
-        modes: std::collections::HashMap::new(),
         linear: crate::config::LinearConfig::default(),
         hooks: crate::config::HooksConfig::default(),
         hardware: crate::config::HardwareConfig::default(),
@@ -6921,7 +6919,6 @@ mod tests {
             allowed_users: vec!["*".into()],
             thread_replies: Some(true),
             mention_only: Some(false),
-            mode: None,
         });
         assert!(has_launchable_channels(&channels));
 

@@ -196,10 +196,6 @@ pub struct Config {
     #[serde(default)]
     pub agents: HashMap<String, DelegateAgentConfig>,
 
-    /// Mode configurations for persona-based routing (`[modes]`).
-    #[serde(default)]
-    pub modes: HashMap<String, ModeConfig>,
-
     /// Tool allowlist: if non-empty, only the named tools are offered to the model.
     /// Useful for constrained deployments or when the model struggles with many tools.
     /// Default: empty (all registered tools are offered).
@@ -265,47 +261,6 @@ fn default_max_depth() -> u32 {
 
 fn default_max_tool_iterations() -> usize {
     10
-}
-
-// ── Mode Layer ──────────────────────────────────────────────────
-
-/// Visual identity override for a mode (Slack username + icon_emoji).
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct VisualIdentityConfig {
-    /// Display name override (Slack `chat:write.customize`).
-    #[serde(default)]
-    pub username: Option<String>,
-    /// Icon emoji override (e.g. `:clipboard:`).
-    #[serde(default)]
-    pub icon_emoji: Option<String>,
-}
-
-/// Configuration for a single mode (e.g. `[modes.pm]`).
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct ModeConfig {
-    /// Identity format: "aieos" or "openclaw".
-    #[serde(default = "default_identity_format")]
-    pub identity_format: String,
-    /// Path to AIEOS identity JSON (relative to workspace).
-    #[serde(default)]
-    pub aieos_path: Option<String>,
-    /// Directory containing mode-specific skill manifests.
-    #[serde(default)]
-    pub skills_dir: Option<String>,
-    /// Visual identity for this mode (username + icon_emoji).
-    #[serde(default)]
-    pub visual_identity: Option<VisualIdentityConfig>,
-    /// Response policy text injected into system prompt.
-    #[serde(default)]
-    pub response_policy: Option<String>,
-    /// Tools available in this mode. If non-empty, only these tools are offered to the model.
-    /// Falls back to the global `tool_allowlist` when empty; if that is also empty, all tools.
-    #[serde(default)]
-    pub tool_allowlist: Vec<String>,
-    /// Temperature override for this mode (0.0–2.0). Overrides `default_temperature` when set.
-    /// Lower values (e.g. 0.1) reduce hallucination; higher values (e.g. 1.2) increase creativity.
-    #[serde(default)]
-    pub temperature: Option<f64>,
 }
 
 // ── Linear Config ────────────────────────────────────────────────
@@ -2512,11 +2467,6 @@ pub struct ChannelsConfig {
     pub slack: Option<SlackConfig>,
     /// Mattermost bot channel configuration (single bot).
     pub mattermost: Option<MattermostConfig>,
-    /// Multiple Mattermost bot channels — one entry per bot token.
-    /// Use `[[channels_config.mattermost_bots]]` in TOML.
-    /// Each entry spawns an independent `MattermostChannel` within a single process.
-    #[serde(default)]
-    pub mattermost_bots: Vec<MattermostConfig>,
     /// Webhook channel configuration.
     pub webhook: Option<WebhookConfig>,
     /// iMessage channel configuration (macOS only).
@@ -2657,7 +2607,6 @@ impl Default for ChannelsConfig {
             discord: None,
             slack: None,
             mattermost: None,
-            mattermost_bots: vec![],
             webhook: None,
             imessage: None,
             matrix: None,
@@ -2798,29 +2747,6 @@ pub struct MattermostConfig {
     /// Other messages in the channel are silently ignored.
     #[serde(default)]
     pub mention_only: Option<bool>,
-    /// Mode name to link this bot to a `[modes.<name>]` entry.
-    ///
-    /// **Default**: unset (`None`) — the bot joins the shared runtime context pool.
-    ///
-    /// When set, the bot gets its own `ChannelRuntimeContext` with the mode's
-    /// system prompt, tool allowlist, and temperature — independent of the
-    /// shared runtime context used by other channels. Provider and Memory are
-    /// still shared (Arc cloning). The bot will not appear in the shared
-    /// message bus; it is spawned with its own listener and dispatch loop.
-    ///
-    /// **Compatibility**: adding this key is backward-compatible; omitting it
-    /// or setting it to a different value preserves the shared-pool behavior.
-    /// Existing deployments that do not set `mode` continue operating unchanged.
-    ///
-    /// **Migration/rollback**: to revert a bot from per-mode to shared-pool,
-    /// remove the `mode` key (or set it to a different value) and restart.
-    /// The bot rejoins the shared pool and its per-mode conversation histories
-    /// are discarded (in-memory only — no persistent state is affected).
-    /// To roll back the entire feature, remove all `mode` fields from
-    /// `[[channels_config.mattermost_bots]]` entries and remove `[modes.*]`
-    /// sections; the runtime falls back to the original shared-context path.
-    #[serde(default)]
-    pub mode: Option<String>,
 }
 
 impl ChannelConfig for MattermostConfig {
@@ -3568,7 +3494,6 @@ impl Default for Config {
             cost: CostConfig::default(),
             peripherals: PeripheralsConfig::default(),
             agents: HashMap::new(),
-            modes: HashMap::new(),
             tool_allowlist: Vec::new(),
             linear: LinearConfig::default(),
             hooks: HooksConfig::default(),
@@ -4818,7 +4743,6 @@ default_temperature = 0.7
                 discord: None,
                 slack: None,
                 mattermost: None,
-                mattermost_bots: vec![],
                 webhook: None,
                 imessage: None,
                 matrix: None,
@@ -4852,7 +4776,6 @@ default_temperature = 0.7
             cost: CostConfig::default(),
             peripherals: PeripheralsConfig::default(),
             agents: HashMap::new(),
-            modes: HashMap::new(),
             tool_allowlist: Vec::new(),
             linear: LinearConfig::default(),
             hooks: HooksConfig::default(),
@@ -5029,7 +4952,6 @@ tool_dispatcher = "xml"
             cost: CostConfig::default(),
             peripherals: PeripheralsConfig::default(),
             agents: HashMap::new(),
-            modes: HashMap::new(),
             tool_allowlist: Vec::new(),
             linear: LinearConfig::default(),
             hooks: HooksConfig::default(),
@@ -5378,7 +5300,6 @@ allowed_users = ["@ops:matrix.org"]
             discord: None,
             slack: None,
             mattermost: None,
-            mattermost_bots: vec![],
             webhook: None,
             imessage: Some(IMessageConfig {
                 allowed_contacts: vec!["+1".into()],
@@ -5592,7 +5513,6 @@ channel_id = "C123"
             discord: None,
             slack: None,
             mattermost: None,
-            mattermost_bots: vec![],
             webhook: None,
             imessage: None,
             matrix: None,

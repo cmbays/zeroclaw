@@ -222,8 +222,6 @@ struct ChannelRuntimeContext {
     hooks: Option<Arc<crate::hooks::HookRunner>>,
     non_cli_excluded_tools: Arc<Vec<String>>,
     global_tool_allowlist: Arc<Vec<String>>,
-    mode_registry: Option<Arc<crate::modes::ModeRegistry>>,
-    thread_mode_state: Arc<crate::modes::thread_state::ThreadModeState>,
 }
 
 #[derive(Clone)]
@@ -269,61 +267,6 @@ fn conversation_history_key(msg: &traits::ChannelMessage) -> String {
 
 fn interruption_scope_key(msg: &traits::ChannelMessage) -> String {
     format!("{}_{}_{}", msg.channel, msg.reply_target, msg.sender)
-}
-
-/// Resolve the active modes for a thread, checking both new activations and existing state.
-///
-/// Mode activations are **additive**: activating `[devops]` in a thread that already has
-/// `[pm]` active returns `["pm", "devops"]` — both modes respond.
-///
-/// Activation only persists for threaded conversations (messages with `thread_ts`).
-/// Non-threaded activations apply to the single message only and are not stored.
-fn resolve_thread_mode(ctx: &ChannelRuntimeContext, msg: &traits::ChannelMessage) -> Vec<String> {
-    let Some(registry) = ctx.mode_registry.as_ref() else {
-        return Vec::new();
-    };
-    // Check for a new mode activation in this message.
-    if let Some(candidate) = crate::modes::parse_mode_activation(&msg.content) {
-        if registry.has_mode(&candidate) {
-            if let Some(ref ts) = msg.thread_ts {
-                // Additive: does not replace existing modes.
-                ctx.thread_mode_state.add_mode(ts, candidate.clone());
-            } else {
-                // No thread_ts — applies to this message only, not persisted.
-                return vec![candidate];
-            }
-        } else {
-            // Mode name parsed but not registered — log for operator visibility.
-            tracing::debug!(
-                mode = candidate.as_str(),
-                channel = msg.channel.as_str(),
-                "Unknown mode activation attempted; available: {:?}",
-                registry.mode_names()
-            );
-        }
-    }
-    // Return all modes currently active on this thread (includes any just-added).
-    msg.thread_ts
-        .as_ref()
-        .map(|ts| ctx.thread_mode_state.get_modes(ts))
-        .unwrap_or_default()
-}
-
-/// Apply mode visual identity to a `SendMessage` if active.
-///
-/// **Note on `finalize_draft`**: The `finalize_draft` trait method (Slack `chat.update`)
-/// does not accept identity overrides. Slack preserves the original message's `username`
-/// and `icon_emoji` on update, so the identity set via `send_draft` carries through.
-/// If a future channel implementation does not preserve identity on update, the
-/// `finalize_draft` trait should be extended to accept optional identity overrides.
-fn apply_mode_identity(
-    msg: SendMessage,
-    vi: Option<&crate::config::VisualIdentityConfig>,
-) -> SendMessage {
-    match vi {
-        Some(vi) => msg.with_identity(vi.username.clone(), vi.icon_emoji.clone()),
-        None => msg,
-    }
 }
 
 /// Strip tool-call XML tags from outgoing messages.
@@ -1599,18 +1542,7 @@ async fn process_channel_message(
         return;
     }
 
-    // ── Multi-mode activation and resolution ─────────────────
-    // Modes are additive: each `@bot [mode]` activation in a thread is remembered
-    // independently, so `[pm]` + `[devops]` → both respond to subsequent messages.
-    let active_modes = resolve_thread_mode(&ctx, &msg);
-    let modes_to_dispatch: Vec<Option<String>> = if active_modes.is_empty() {
-        vec![None]
-    } else {
-        active_modes.into_iter().map(Some).collect()
-    };
-    let multi_mode = modes_to_dispatch.len() > 1;
-
-    // ── Shared setup (runs once for all modes) ─────────────
+    // ── Shared setup ────────────────────────────────────────
     if ctx.auto_save_memory && msg.content.chars().count() >= AUTOSAVE_MIN_MESSAGE_CHARS {
         let autosave_key = conversation_memory_key(&msg);
         let _ = ctx
@@ -1654,31 +1586,11 @@ async fn process_channel_message(
 
     let mut had_any_success = false;
 
-    // ── Per-mode dispatch loop ──────────────────────────────
-    'modes: for active_mode in modes_to_dispatch {
-        let mode_str = active_mode.as_deref();
-        let mode_visual_identity = mode_str.and_then(|name| {
-            ctx.mode_registry
-                .as_ref()
-                .and_then(|r| r.get_mode(name))
-                .and_then(|m| m.visual_identity.as_ref())
-                .cloned()
-        });
-        // History key is scoped to (channel, mode_name, thread_ts) so each mode
-        // maintains its own independent conversation context within the thread.
-        let history_key = match mode_str {
-            Some(name) => match msg.thread_ts.as_ref() {
-                Some(ts) => format!("{}_{}_{}", msg.channel, name, ts),
-                None => format!("{}_{}", msg.channel, name),
-            },
-            None => conversation_history_key(&msg),
-        };
+    {
+        let history_key = conversation_history_key(&msg);
         let route = get_route_selection(ctx.as_ref(), &history_key);
         let runtime_defaults = runtime_defaults_snapshot(ctx.as_ref());
-        let effective_temperature = mode_str
-            .and_then(|name| ctx.mode_registry.as_ref()?.get_mode(name))
-            .and_then(|m| m.temperature)
-            .unwrap_or(runtime_defaults.temperature);
+        let effective_temperature = runtime_defaults.temperature;
         let active_provider = match get_or_create_provider(ctx.as_ref(), &route.provider).await {
             Ok(provider) => provider,
             Err(err) => {
@@ -1689,15 +1601,13 @@ async fn process_channel_message(
                 );
                 if let Some(channel) = target_channel.as_ref() {
                     let _ = channel
-                        .send(&apply_mode_identity(
-                            SendMessage::new(message, &msg.reply_target)
+                        .send(
+                            &SendMessage::new(message, &msg.reply_target)
                                 .in_thread(msg.thread_ts.clone()),
-                            mode_visual_identity.as_ref(),
-                        ))
+                        )
                         .await;
                 }
-                // Provider failure is usually systemic; abort all remaining modes.
-                break 'modes;
+                return;
             }
         };
 
@@ -1734,19 +1644,14 @@ async fn process_channel_message(
             }
         }
 
-        let base_prompt = mode_str
-            .and_then(|name| ctx.mode_registry.as_ref()?.get_mode(name))
-            .map(|m| m.system_prompt.as_str())
-            .unwrap_or(ctx.system_prompt.as_str());
+        let base_prompt = ctx.system_prompt.as_str();
         let system_prompt = build_channel_system_prompt(base_prompt, &msg.channel);
         let mut history = vec![ChatMessage::system(system_prompt)];
         history.extend(prior_turns);
 
-        // Disable streaming for multi-mode dispatch to avoid interleaved draft updates.
-        let use_streaming = !multi_mode
-            && target_channel
-                .as_ref()
-                .is_some_and(|ch| ch.supports_draft_updates());
+        let use_streaming = target_channel
+            .as_ref()
+            .is_some_and(|ch| ch.supports_draft_updates());
 
         tracing::debug!(
             channel = %msg.channel,
@@ -1766,10 +1671,10 @@ async fn process_channel_message(
         let draft_message_id = if use_streaming {
             if let Some(channel) = target_channel.as_ref() {
                 match channel
-                    .send_draft(&apply_mode_identity(
-                        SendMessage::new("...", &msg.reply_target).in_thread(msg.thread_ts.clone()),
-                        mode_visual_identity.as_ref(),
-                    ))
+                    .send_draft(
+                        &SendMessage::new("...", &msg.reply_target)
+                            .in_thread(msg.thread_ts.clone()),
+                    )
                     .await
                 {
                     Ok(id) => id,
@@ -1813,23 +1718,14 @@ async fn process_channel_message(
             None
         };
 
-        // Resolve the effective tool exclusion list for this mode:
-        // 1. If the active mode defines a tool_allowlist, derive excluded = all registered tools
-        //    NOT in that allowlist.
-        // 2. Otherwise fall back to the global config tool_allowlist.
-        // 3. Merge with non_cli_excluded_tools (channel-level exclusions).
-        let mode_allowlist: Option<&Vec<String>> = active_mode
-            .as_ref()
-            .and_then(|name| ctx.mode_registry.as_ref()?.get_mode(name))
-            .map(|m| &m.tool_allowlist)
-            .filter(|l| !l.is_empty());
-        let effective_allowlist: Option<&Vec<String>> = mode_allowlist.or_else(|| {
-            if ctx.global_tool_allowlist.is_empty() {
-                None
-            } else {
-                Some(&ctx.global_tool_allowlist)
-            }
-        });
+        // Resolve the effective tool exclusion list:
+        // 1. Use the global config tool_allowlist if non-empty.
+        // 2. Merge with non_cli_excluded_tools (channel-level exclusions).
+        let effective_allowlist: Option<&Vec<String>> = if ctx.global_tool_allowlist.is_empty() {
+            None
+        } else {
+            Some(&ctx.global_tool_allowlist)
+        };
         let mode_excluded: Vec<String> = match effective_allowlist {
             None => Vec::new(),
             Some(allowlist) => {
@@ -1920,13 +1816,12 @@ async fn process_channel_message(
                         tracing::debug!("Failed to cancel draft on {}: {err}", channel.name());
                     }
                 }
-                break 'modes; // cancel propagates to all remaining modes
             }
             LlmExecutionResult::Completed(Ok(Ok(response))) => {
                 had_any_success = true;
                 // ── Hook: on_message_sending (modifying) ─────────
                 let mut outbound_response = response;
-                if let Some(hooks) = &ctx.hooks {
+                let hook_cancelled = if let Some(hooks) = &ctx.hooks {
                     match hooks
                         .run_on_message_sending(
                             msg.channel.clone(),
@@ -1937,7 +1832,7 @@ async fn process_channel_message(
                     {
                         crate::hooks::HookResult::Cancel(reason) => {
                             tracing::info!(%reason, "outgoing message suppressed by hook");
-                            continue 'modes;
+                            true
                         }
                         crate::hooks::HookResult::Continue((
                             hook_channel,
@@ -1978,80 +1873,86 @@ async fn process_channel_message(
                             }
 
                             outbound_response = modified_content;
+                            false
                         }
                     }
-                }
-
-                let sanitized_response =
-                    sanitize_channel_response(&outbound_response, ctx.tools_registry.as_ref());
-                let delivered_response = if sanitized_response.is_empty()
-                    && !outbound_response.trim().is_empty()
-                {
-                    "I encountered malformed tool-call output and could not produce a safe reply. Please try again.".to_string()
                 } else {
-                    sanitized_response
-                };
-                runtime_trace::record_event(
-                    "channel_message_outbound",
-                    Some(msg.channel.as_str()),
-                    Some(route.provider.as_str()),
-                    Some(route.model.as_str()),
-                    None,
-                    Some(true),
-                    None,
-                    serde_json::json!({
-                        "sender": msg.sender,
-                        "elapsed_ms": started_at.elapsed().as_millis(),
-                        "response": scrub_credentials(&delivered_response),
-                    }),
-                );
-
-                // Extract condensed tool-use context from the history messages
-                // added during run_tool_call_loop, so the LLM retains awareness
-                // of what it did on subsequent turns.
-                let tool_summary = extract_tool_context_summary(&history, history_len_before_tools);
-                let history_response = if tool_summary.is_empty() || msg.channel == "telegram" {
-                    delivered_response.clone()
-                } else {
-                    format!("{tool_summary}\n{delivered_response}")
+                    false
                 };
 
-                append_sender_turn(
-                    ctx.as_ref(),
-                    &history_key,
-                    ChatMessage::assistant(&history_response),
-                );
-                println!(
-                    "  🤖 Reply ({}ms): {}",
-                    started_at.elapsed().as_millis(),
-                    truncate_with_ellipsis(&delivered_response, 80)
-                );
-                if let Some(channel) = target_channel.as_ref() {
-                    if let Some(ref draft_id) = draft_message_id {
-                        if let Err(e) = channel
-                            .finalize_draft(&msg.reply_target, draft_id, &delivered_response)
+                if !hook_cancelled {
+                    let sanitized_response =
+                        sanitize_channel_response(&outbound_response, ctx.tools_registry.as_ref());
+                    let delivered_response = if sanitized_response.is_empty()
+                        && !outbound_response.trim().is_empty()
+                    {
+                        "I encountered malformed tool-call output and could not produce a safe reply. Please try again.".to_string()
+                    } else {
+                        sanitized_response
+                    };
+                    runtime_trace::record_event(
+                        "channel_message_outbound",
+                        Some(msg.channel.as_str()),
+                        Some(route.provider.as_str()),
+                        Some(route.model.as_str()),
+                        None,
+                        Some(true),
+                        None,
+                        serde_json::json!({
+                            "sender": msg.sender,
+                            "elapsed_ms": started_at.elapsed().as_millis(),
+                            "response": scrub_credentials(&delivered_response),
+                        }),
+                    );
+
+                    // Extract condensed tool-use context from the history messages
+                    // added during run_tool_call_loop, so the LLM retains awareness
+                    // of what it did on subsequent turns.
+                    let tool_summary =
+                        extract_tool_context_summary(&history, history_len_before_tools);
+                    let history_response = if tool_summary.is_empty() || msg.channel == "telegram" {
+                        delivered_response.clone()
+                    } else {
+                        format!("{tool_summary}\n{delivered_response}")
+                    };
+
+                    append_sender_turn(
+                        ctx.as_ref(),
+                        &history_key,
+                        ChatMessage::assistant(&history_response),
+                    );
+                    println!(
+                        "  🤖 Reply ({}ms): {}",
+                        started_at.elapsed().as_millis(),
+                        truncate_with_ellipsis(&delivered_response, 80)
+                    );
+                    if let Some(channel) = target_channel.as_ref() {
+                        if let Some(ref draft_id) = draft_message_id {
+                            if let Err(e) = channel
+                                .finalize_draft(&msg.reply_target, draft_id, &delivered_response)
+                                .await
+                            {
+                                tracing::warn!(
+                                    "Failed to finalize draft: {e}; sending as new message"
+                                );
+                                let _ = channel
+                                    .send(
+                                        &SendMessage::new(&delivered_response, &msg.reply_target)
+                                            .in_thread(msg.thread_ts.clone()),
+                                    )
+                                    .await;
+                            }
+                        } else if let Err(e) = channel
+                            .send(
+                                &SendMessage::new(delivered_response, &msg.reply_target)
+                                    .in_thread(msg.thread_ts.clone()),
+                            )
                             .await
                         {
-                            tracing::warn!("Failed to finalize draft: {e}; sending as new message");
-                            let _ = channel
-                                .send(&apply_mode_identity(
-                                    SendMessage::new(&delivered_response, &msg.reply_target)
-                                        .in_thread(msg.thread_ts.clone()),
-                                    mode_visual_identity.as_ref(),
-                                ))
-                                .await;
+                            eprintln!("  ❌ Failed to reply on {}: {e}", channel.name());
                         }
-                    } else if let Err(e) = channel
-                        .send(&apply_mode_identity(
-                            SendMessage::new(delivered_response, &msg.reply_target)
-                                .in_thread(msg.thread_ts.clone()),
-                            mode_visual_identity.as_ref(),
-                        ))
-                        .await
-                    {
-                        eprintln!("  ❌ Failed to reply on {}: {e}", channel.name());
                     }
-                }
+                } // end if !hook_cancelled
             }
             LlmExecutionResult::Completed(Ok(Err(e))) => {
                 if crate::agent::loop_::is_tool_loop_cancelled(&e)
@@ -2082,7 +1983,6 @@ async fn process_channel_message(
                             tracing::debug!("Failed to cancel draft on {}: {err}", channel.name());
                         }
                     }
-                    break 'modes; // cancel propagates to all remaining modes
                 } else if is_context_window_overflow_error(&e) {
                     let compacted = compact_sender_history(ctx.as_ref(), &history_key);
                     let error_text = if compacted {
@@ -2116,11 +2016,10 @@ async fn process_channel_message(
                                 .await;
                         } else {
                             let _ = channel
-                                .send(&apply_mode_identity(
-                                    SendMessage::new(error_text, &msg.reply_target)
+                                .send(
+                                    &SendMessage::new(error_text, &msg.reply_target)
                                         .in_thread(msg.thread_ts.clone()),
-                                    mode_visual_identity.as_ref(),
-                                ))
+                                )
                                 .await;
                         }
                     }
@@ -2168,11 +2067,10 @@ async fn process_channel_message(
                                 .await;
                         } else {
                             let _ = channel
-                                .send(&apply_mode_identity(
-                                    SendMessage::new(error_text, &msg.reply_target)
+                                .send(
+                                    &SendMessage::new(error_text, &msg.reply_target)
                                         .in_thread(msg.thread_ts.clone()),
-                                    mode_visual_identity.as_ref(),
-                                ))
+                                )
                                 .await;
                         }
                     }
@@ -2217,17 +2115,16 @@ async fn process_channel_message(
                             .await;
                     } else {
                         let _ = channel
-                            .send(&apply_mode_identity(
-                                SendMessage::new(error_text, &msg.reply_target)
+                            .send(
+                                &SendMessage::new(error_text, &msg.reply_target)
                                     .in_thread(msg.thread_ts.clone()),
-                                mode_visual_identity.as_ref(),
-                            ))
+                            )
                             .await;
                     }
                 }
             }
         }
-    } // end 'modes loop
+    } // end dispatch block
 
     if let Some(token) = typing_cancellation.as_ref() {
         token.cancel();
@@ -2886,25 +2783,6 @@ fn collect_configured_channels(
         });
     }
 
-    for mm in &config.channels_config.mattermost_bots {
-        if mm.mode.is_some() {
-            // Mode-linked bots get their own ChannelRuntimeContext spawned in
-            // start_channels; they are excluded from the shared message bus here.
-            continue;
-        }
-        channels.push(ConfiguredChannel {
-            display_name: "Mattermost",
-            channel: Arc::new(MattermostChannel::new(
-                mm.url.clone(),
-                mm.bot_token.clone(),
-                mm.channel_id.clone(),
-                mm.allowed_users.clone(),
-                mm.thread_replies.unwrap_or(true),
-                mm.mention_only.unwrap_or(false),
-            )),
-        });
-    }
-
     if let Some(ref im) = config.channels_config.imessage {
         channels.push(ConfiguredChannel {
             display_name: "iMessage",
@@ -3132,14 +3010,7 @@ pub async fn doctor_channels(config: Config) -> Result<()> {
         });
     }
 
-    let mode_bot_count = config
-        .channels_config
-        .mattermost_bots
-        .iter()
-        .filter(|mm| mm.mode.is_some())
-        .count();
-
-    if channels.is_empty() && mode_bot_count == 0 {
+    if channels.is_empty() {
         println!("No real-time channels configured. Run `zeroclaw onboard` first.");
         return Ok(());
     }
@@ -3178,13 +3049,6 @@ pub async fn doctor_channels(config: Config) -> Result<()> {
     if config.channels_config.webhook.is_some() {
         println!("  ℹ️  Webhook   check via `zeroclaw gateway` then GET /health");
     }
-    if mode_bot_count > 0 {
-        println!(
-            "  ℹ️  {mode_bot_count} mode-linked Mattermost bot(s) are not checked here; \
-             verify their tokens by running `zeroclaw start` and checking startup output."
-        );
-    }
-
     println!();
     println!("Summary: {healthy} healthy, {unhealthy} unhealthy, {timeout} timed out");
     Ok(())
@@ -3352,42 +3216,10 @@ pub async fn start_channels(config: Config) -> Result<()> {
         native_tools,
         config.skills.prompt_injection_mode,
     );
-    let tool_instructions_suffix = if native_tools {
-        String::new()
-    } else {
+    if !native_tools {
         let suffix = build_tool_instructions(tools_registry.as_ref());
         system_prompt.push_str(&suffix);
-        suffix
-    };
-
-    // ── Mode Layer ──────────────────────────────────────────────
-    let mode_registry = if config.modes.is_empty() {
-        None
-    } else {
-        match crate::modes::ModeRegistry::from_config(
-            &config,
-            &tool_descs,
-            &skills,
-            bootstrap_max_chars,
-            native_tools,
-            config.skills.prompt_injection_mode,
-            &tool_instructions_suffix,
-        ) {
-            Ok(registry) => {
-                let names = registry.mode_names();
-                if !names.is_empty() {
-                    println!("  🎭 Modes:    {}", names.join(", "));
-                }
-                Some(Arc::new(registry))
-            }
-            Err(e) => {
-                tracing::error!("Failed to load configured modes: {e}");
-                eprintln!("  ⚠️ Failed to load modes: {e}");
-                None
-            }
-        }
-    };
-    let thread_mode_state = Arc::new(crate::modes::thread_state::ThreadModeState::new());
+    }
 
     if !skills.is_empty() {
         println!(
@@ -3401,7 +3233,6 @@ pub async fn start_channels(config: Config) -> Result<()> {
     }
 
     // Collect active channels from a shared builder to keep startup and doctor parity.
-    // Mode-linked mattermost bots are excluded here; they get their own contexts below.
     let mut channels: Vec<Arc<dyn Channel>> =
         collect_configured_channels(&config, "runtime startup")
             .into_iter()
@@ -3413,12 +3244,7 @@ pub async fn start_channels(config: Config) -> Result<()> {
             NostrChannel::new(&ns.private_key, ns.relays.clone(), &ns.allowed_pubkeys).await?,
         ));
     }
-    let has_mode_linked_bots = config
-        .channels_config
-        .mattermost_bots
-        .iter()
-        .any(|mm| mm.mode.is_some());
-    if channels.is_empty() && !has_mode_linked_bots {
+    if channels.is_empty() {
         println!("No channels configured. Run `zeroclaw onboard` to set up channels.");
         return Ok(());
     }
@@ -3443,15 +3269,6 @@ pub async fn start_channels(config: Config) -> Result<()> {
                 .collect::<Vec<_>>()
                 .join(", ")
         );
-    }
-    let mode_bot_names: Vec<&str> = config
-        .channels_config
-        .mattermost_bots
-        .iter()
-        .filter_map(|mm| mm.mode.as_deref())
-        .collect();
-    if !mode_bot_names.is_empty() {
-        println!("  🤖 Mode bots: {}", mode_bot_names.join(", "));
     }
     println!();
     println!("  Listening for messages... (Ctrl+C to stop)");
@@ -3538,128 +3355,13 @@ pub async fn start_channels(config: Config) -> Result<()> {
         },
         non_cli_excluded_tools: Arc::new(config.autonomy.non_cli_excluded_tools.clone()),
         global_tool_allowlist: Arc::new(config.tool_allowlist.clone()),
-        mode_registry,
-        thread_mode_state,
     });
-
-    // ── Per-mode Mattermost bot contexts ────────────────────────────────────────
-    // Each mattermost_bots entry with `mode = "<name>"` gets its own:
-    //   - ChannelRuntimeContext (mode-specific prompt, tools, temperature)
-    //   - mpsc channel pair (isolated from the shared message bus)
-    //   - supervised listener + dispatch loop (spawned as tokio tasks)
-    // Provider and Memory are Arc-cloned from the shared instances.
-    let mut bot_dispatch_handles = Vec::new();
-    for mm in &config.channels_config.mattermost_bots {
-        let Some(ref mode_name) = mm.mode else {
-            continue;
-        };
-
-        // Fail fast: a mode-linked bot with no matching mode definition is always a
-        // misconfiguration. Silently falling back to global defaults would violate
-        // Secure by Default — the global tool allowlist may be broader than the
-        // intended per-bot subset, and the wrong system prompt would be used.
-        let registry = runtime_ctx.mode_registry.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "Mattermost bot has `mode = {:?}` but no [modes] section is configured. \
-                 Add a [modes.{}] entry or remove the `mode` field from this bot.",
-                mode_name,
-                mode_name
-            )
-        })?;
-        let mode_def = registry.get_mode(mode_name).ok_or_else(|| {
-            anyhow::anyhow!(
-                "Mattermost bot references mode {:?}, which is not defined. \
-                 Available modes: [{}]. Check your [modes] config section.",
-                mode_name,
-                registry.mode_names().join(", ")
-            )
-        })?;
-        let bot_tool_allowlist = if mode_def.tool_allowlist.is_empty() {
-            Arc::clone(&runtime_ctx.global_tool_allowlist)
-        } else {
-            Arc::new(mode_def.tool_allowlist.clone())
-        };
-        let bot_system_prompt = Arc::new(mode_def.system_prompt.clone());
-        let bot_temperature = mode_def.temperature.unwrap_or(temperature);
-
-        let bot_channel: Arc<dyn Channel> = Arc::new(MattermostChannel::new(
-            mm.url.clone(),
-            mm.bot_token.clone(),
-            mm.channel_id.clone(),
-            mm.allowed_users.clone(),
-            mm.thread_replies.unwrap_or(true),
-            mm.mention_only.unwrap_or(false),
-        ));
-        let bot_channels_by_name = Arc::new(HashMap::from([(
-            "mattermost".to_string(),
-            Arc::clone(&bot_channel),
-        )]));
-        let mut bot_provider_cache: HashMap<String, Arc<dyn Provider>> = HashMap::new();
-        bot_provider_cache.insert(
-            runtime_ctx.default_provider.as_ref().clone(),
-            Arc::clone(&provider),
-        );
-
-        let bot_ctx = Arc::new(ChannelRuntimeContext {
-            channels_by_name: bot_channels_by_name,
-            provider: Arc::clone(&provider),
-            default_provider: Arc::clone(&runtime_ctx.default_provider),
-            memory: Arc::clone(&mem),
-            tools_registry: Arc::clone(&tools_registry),
-            observer: Arc::clone(&runtime_ctx.observer),
-            system_prompt: bot_system_prompt,
-            model: Arc::clone(&runtime_ctx.model),
-            temperature: bot_temperature,
-            auto_save_memory: runtime_ctx.auto_save_memory,
-            max_tool_iterations: runtime_ctx.max_tool_iterations,
-            min_relevance_score: runtime_ctx.min_relevance_score,
-            conversation_histories: Arc::new(Mutex::new(HashMap::new())),
-            provider_cache: Arc::new(Mutex::new(bot_provider_cache)),
-            route_overrides: Arc::new(Mutex::new(HashMap::new())),
-            api_key: runtime_ctx.api_key.clone(),
-            api_url: runtime_ctx.api_url.clone(),
-            reliability: Arc::clone(&runtime_ctx.reliability),
-            provider_runtime_options: runtime_ctx.provider_runtime_options.clone(),
-            workspace_dir: Arc::clone(&runtime_ctx.workspace_dir),
-            message_timeout_secs: runtime_ctx.message_timeout_secs,
-            interrupt_on_new_message: false,
-            multimodal: runtime_ctx.multimodal.clone(),
-            hooks: runtime_ctx.hooks.clone(),
-            non_cli_excluded_tools: Arc::clone(&runtime_ctx.non_cli_excluded_tools),
-            global_tool_allowlist: bot_tool_allowlist,
-            // Per-bot ctx: the channel IS the mode; no in-thread mode switching.
-            mode_registry: None,
-            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
-        });
-
-        tracing::info!(
-            mode = mode_name.as_str(),
-            "Spawning per-mode Mattermost bot context"
-        );
-
-        let (bot_tx, bot_rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(100);
-        handles.push(spawn_supervised_listener(
-            Arc::clone(&bot_channel),
-            bot_tx,
-            initial_backoff_secs,
-            max_backoff_secs,
-        ));
-        bot_dispatch_handles.push(tokio::spawn(run_message_dispatch_loop(
-            bot_rx,
-            bot_ctx,
-            compute_max_in_flight_messages(1),
-        )));
-    }
 
     run_message_dispatch_loop(rx, runtime_ctx, max_in_flight_messages).await;
 
-    // Wait for all channel tasks (shared + per-mode bot listeners)
+    // Wait for all channel listener tasks.
     for h in handles {
         let _ = h.await;
-    }
-    // Wait for per-mode bot dispatch loops; surface panics via existing helper.
-    for h in bot_dispatch_handles {
-        log_worker_join_result(h.await);
     }
 
     Ok(())
@@ -3867,8 +3569,6 @@ mod tests {
             message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
             non_cli_excluded_tools: Arc::new(Vec::new()),
             global_tool_allowlist: Arc::new(Vec::new()),
-            mode_registry: None,
-            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
         };
 
         assert!(compact_sender_history(&ctx, &sender));
@@ -3919,8 +3619,6 @@ mod tests {
             message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
             non_cli_excluded_tools: Arc::new(Vec::new()),
             global_tool_allowlist: Arc::new(Vec::new()),
-            mode_registry: None,
-            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
         };
 
         append_sender_turn(&ctx, &sender, ChatMessage::user("hello"));
@@ -3974,8 +3672,6 @@ mod tests {
             message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
             non_cli_excluded_tools: Arc::new(Vec::new()),
             global_tool_allowlist: Arc::new(Vec::new()),
-            mode_registry: None,
-            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
         };
 
         assert!(rollback_orphan_user_turn(&ctx, &sender, "pending"));
@@ -4450,8 +4146,6 @@ BTC is currently around $65,000 based on latest tool output."#
             interrupt_on_new_message: false,
             non_cli_excluded_tools: Arc::new(Vec::new()),
             global_tool_allowlist: Arc::new(Vec::new()),
-            mode_registry: None,
-            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
         });
@@ -4512,8 +4206,6 @@ BTC is currently around $65,000 based on latest tool output."#
             interrupt_on_new_message: false,
             non_cli_excluded_tools: Arc::new(Vec::new()),
             global_tool_allowlist: Arc::new(Vec::new()),
-            mode_registry: None,
-            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
         });
@@ -4590,8 +4282,6 @@ BTC is currently around $65,000 based on latest tool output."#
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
             global_tool_allowlist: Arc::new(Vec::new()),
-            mode_registry: None,
-            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
         });
 
         process_channel_message(
@@ -4652,8 +4342,6 @@ BTC is currently around $65,000 based on latest tool output."#
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
             global_tool_allowlist: Arc::new(Vec::new()),
-            mode_registry: None,
-            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
         });
 
         process_channel_message(
@@ -4723,8 +4411,6 @@ BTC is currently around $65,000 based on latest tool output."#
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
             global_tool_allowlist: Arc::new(Vec::new()),
-            mode_registry: None,
-            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
         });
 
         process_channel_message(
@@ -4815,8 +4501,6 @@ BTC is currently around $65,000 based on latest tool output."#
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
             global_tool_allowlist: Arc::new(Vec::new()),
-            mode_registry: None,
-            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
         });
 
         process_channel_message(
@@ -4889,8 +4573,6 @@ BTC is currently around $65,000 based on latest tool output."#
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
             global_tool_allowlist: Arc::new(Vec::new()),
-            mode_registry: None,
-            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
         });
 
         process_channel_message(
@@ -4978,8 +4660,6 @@ BTC is currently around $65,000 based on latest tool output."#
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
             global_tool_allowlist: Arc::new(Vec::new()),
-            mode_registry: None,
-            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
         });
 
         process_channel_message(
@@ -5052,8 +4732,6 @@ BTC is currently around $65,000 based on latest tool output."#
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
             global_tool_allowlist: Arc::new(Vec::new()),
-            mode_registry: None,
-            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
         });
 
         process_channel_message(
@@ -5115,8 +4793,6 @@ BTC is currently around $65,000 based on latest tool output."#
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
             global_tool_allowlist: Arc::new(Vec::new()),
-            mode_registry: None,
-            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
         });
 
         process_channel_message(
@@ -5289,8 +4965,6 @@ BTC is currently around $65,000 based on latest tool output."#
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
             global_tool_allowlist: Arc::new(Vec::new()),
-            mode_registry: None,
-            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
         });
 
         let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(4);
@@ -5372,8 +5046,6 @@ BTC is currently around $65,000 based on latest tool output."#
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
             global_tool_allowlist: Arc::new(Vec::new()),
-            mode_registry: None,
-            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
         });
 
         let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(8);
@@ -5467,8 +5139,6 @@ BTC is currently around $65,000 based on latest tool output."#
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
             global_tool_allowlist: Arc::new(Vec::new()),
-            mode_registry: None,
-            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
         });
 
         let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(8);
@@ -5544,8 +5214,6 @@ BTC is currently around $65,000 based on latest tool output."#
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
             global_tool_allowlist: Arc::new(Vec::new()),
-            mode_registry: None,
-            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
         });
 
         process_channel_message(
@@ -5606,8 +5274,6 @@ BTC is currently around $65,000 based on latest tool output."#
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
             global_tool_allowlist: Arc::new(Vec::new()),
-            mode_registry: None,
-            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
         });
 
         process_channel_message(
@@ -6125,8 +5791,6 @@ BTC is currently around $65,000 based on latest tool output."#
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
             global_tool_allowlist: Arc::new(Vec::new()),
-            mode_registry: None,
-            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
         });
 
         process_channel_message(
@@ -6213,8 +5877,6 @@ BTC is currently around $65,000 based on latest tool output."#
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
             global_tool_allowlist: Arc::new(Vec::new()),
-            mode_registry: None,
-            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
         });
 
         process_channel_message(
@@ -6301,8 +5963,6 @@ BTC is currently around $65,000 based on latest tool output."#
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
             global_tool_allowlist: Arc::new(Vec::new()),
-            mode_registry: None,
-            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
         });
 
         process_channel_message(
@@ -6618,7 +6278,6 @@ This is an example JSON object for profile settings."#;
             allowed_users: vec![],
             thread_replies: Some(true),
             mention_only: Some(false),
-            mode: None,
         });
 
         let channels = collect_configured_channels(&config, "test");
@@ -6629,82 +6288,6 @@ This is an example JSON object for profile settings."#;
         assert!(channels
             .iter()
             .any(|entry| entry.channel.name() == "mattermost"));
-    }
-
-    #[test]
-    fn collect_configured_channels_mattermost_bots_spawns_one_channel_per_entry() {
-        let mut config = Config::default();
-        config.channels_config.mattermost_bots = vec![
-            crate::config::schema::MattermostConfig {
-                url: "http://localhost:8065".to_string(),
-                bot_token: "token-sokka".to_string(),
-                channel_id: None,
-                allowed_users: vec!["*".to_string()],
-                thread_replies: Some(true),
-                mention_only: Some(true),
-                mode: None,
-            },
-            crate::config::schema::MattermostConfig {
-                url: "http://localhost:8065".to_string(),
-                bot_token: "token-toph".to_string(),
-                channel_id: None,
-                allowed_users: vec!["*".to_string()],
-                thread_replies: Some(true),
-                mention_only: Some(true),
-                mode: None,
-            },
-        ];
-
-        let channels = collect_configured_channels(&config, "test");
-
-        let mm_channels: Vec<_> = channels
-            .iter()
-            .filter(|e| e.channel.name() == "mattermost")
-            .collect();
-        assert_eq!(
-            mm_channels.len(),
-            2,
-            "expected one MattermostChannel per bot entry"
-        );
-    }
-
-    #[test]
-    fn collect_configured_channels_excludes_mode_linked_bots_from_shared_pool() {
-        let mut config = Config::default();
-        config.channels_config.mattermost_bots = vec![
-            // Mode-linked: excluded from shared pool (gets its own context in start_channels)
-            crate::config::schema::MattermostConfig {
-                url: "http://localhost:8065".to_string(),
-                bot_token: "zeroclaw_bot_a".to_string(),
-                channel_id: None,
-                allowed_users: vec!["*".to_string()],
-                thread_replies: Some(true),
-                mention_only: Some(true),
-                mode: Some("zeroclaw_pm".to_string()),
-            },
-            // Non-mode-linked: included in shared pool
-            crate::config::schema::MattermostConfig {
-                url: "http://localhost:8065".to_string(),
-                bot_token: "zeroclaw_bot_b".to_string(),
-                channel_id: None,
-                allowed_users: vec!["*".to_string()],
-                thread_replies: Some(true),
-                mention_only: Some(true),
-                mode: None,
-            },
-        ];
-
-        let channels = collect_configured_channels(&config, "test");
-
-        let mm_channels: Vec<_> = channels
-            .iter()
-            .filter(|e| e.channel.name() == "mattermost")
-            .collect();
-        assert_eq!(
-            mm_channels.len(),
-            1,
-            "mode-linked bots must be excluded from the shared pool"
-        );
     }
 
     struct AlwaysFailChannel {
@@ -6930,8 +6513,6 @@ This is an example JSON object for profile settings."#;
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
             global_tool_allowlist: Arc::new(Vec::new()),
-            mode_registry: None,
-            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
         });
 
         // Simulate a photo attachment message with [IMAGE:] marker.
@@ -6999,8 +6580,6 @@ This is an example JSON object for profile settings."#;
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
             global_tool_allowlist: Arc::new(Vec::new()),
-            mode_registry: None,
-            thread_mode_state: Arc::new(crate::modes::thread_state::ThreadModeState::new()),
         });
 
         process_channel_message(
@@ -7063,193 +6642,6 @@ This is an example JSON object for profile settings."#;
             turns.iter().all(|turn| !turn.content.contains("[IMAGE:")),
             "failed vision turn must not persist image marker content"
         );
-    }
-
-    // ── Mode layer helpers ────────────────────────────────────────
-
-    fn make_registry_with_pm_mode(ws: &std::path::Path) -> Arc<crate::modes::ModeRegistry> {
-        let mut config = crate::config::Config::default();
-        config.workspace_dir = ws.to_path_buf();
-        config.modes.insert(
-            "pm".to_string(),
-            crate::config::ModeConfig {
-                identity_format: "openclaw".to_string(),
-                aieos_path: None,
-                skills_dir: None,
-                visual_identity: None,
-                response_policy: None,
-                tool_allowlist: Vec::new(),
-                temperature: None,
-            },
-        );
-        Arc::new(
-            crate::modes::ModeRegistry::from_config(
-                &config,
-                &[],
-                &[],
-                None,
-                true,
-                crate::config::SkillsPromptInjectionMode::Full,
-                "",
-            )
-            .unwrap(),
-        )
-    }
-
-    fn make_mode_ctx(
-        mode_registry: Option<Arc<crate::modes::ModeRegistry>>,
-        thread_mode_state: Arc<crate::modes::thread_state::ThreadModeState>,
-    ) -> ChannelRuntimeContext {
-        ChannelRuntimeContext {
-            channels_by_name: Arc::new(HashMap::new()),
-            provider: Arc::new(DummyProvider),
-            default_provider: Arc::new("test".to_string()),
-            memory: Arc::new(NoopMemory),
-            tools_registry: Arc::new(vec![]),
-            observer: Arc::new(NoopObserver),
-            system_prompt: Arc::new("system".to_string()),
-            model: Arc::new("test-model".to_string()),
-            temperature: 0.0,
-            auto_save_memory: false,
-            max_tool_iterations: 5,
-            min_relevance_score: 0.0,
-            conversation_histories: Arc::new(Mutex::new(HashMap::new())),
-            provider_cache: Arc::new(Mutex::new(HashMap::new())),
-            route_overrides: Arc::new(Mutex::new(HashMap::new())),
-            api_key: None,
-            api_url: None,
-            reliability: Arc::new(crate::config::ReliabilityConfig::default()),
-            interrupt_on_new_message: false,
-            multimodal: crate::config::MultimodalConfig::default(),
-            hooks: None,
-            provider_runtime_options: providers::ProviderRuntimeOptions::default(),
-            workspace_dir: Arc::new(std::env::temp_dir()),
-            message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
-            non_cli_excluded_tools: Arc::new(Vec::new()),
-            global_tool_allowlist: Arc::new(Vec::new()),
-            mode_registry,
-            thread_mode_state,
-        }
-    }
-
-    fn make_channel_msg(content: &str, thread_ts: Option<&str>) -> traits::ChannelMessage {
-        traits::ChannelMessage {
-            id: "test-id".to_string(),
-            sender: "U123".to_string(),
-            reply_target: "C456".to_string(),
-            content: content.to_string(),
-            channel: "slack".to_string(),
-            timestamp: 0,
-            thread_ts: thread_ts.map(|s| s.to_string()),
-        }
-    }
-
-    // ── C-3: resolve_thread_mode ──────────────────────────────────
-
-    #[test]
-    fn resolve_thread_mode_no_registry_returns_empty() {
-        let state = Arc::new(crate::modes::thread_state::ThreadModeState::new());
-        let ctx = make_mode_ctx(None, state);
-        let msg = make_channel_msg("<@UBOT> pm", None);
-        assert!(resolve_thread_mode(&ctx, &msg).is_empty());
-    }
-
-    #[test]
-    fn resolve_thread_mode_valid_mode_no_thread_ts_returns_without_persisting() {
-        let ws = make_workspace();
-        let registry = make_registry_with_pm_mode(ws.path());
-        let state = Arc::new(crate::modes::thread_state::ThreadModeState::new());
-        let ctx = make_mode_ctx(Some(registry), Arc::clone(&state));
-        let msg = make_channel_msg("<@UBOT> pm", None);
-        // Returns the mode but does not store it (no thread_ts to key on)
-        assert_eq!(resolve_thread_mode(&ctx, &msg), vec!["pm".to_string()]);
-        assert_eq!(
-            state.active_count(),
-            0,
-            "should not persist without thread_ts"
-        );
-    }
-
-    #[test]
-    fn resolve_thread_mode_valid_mode_with_thread_ts_persists() {
-        let ws = make_workspace();
-        let registry = make_registry_with_pm_mode(ws.path());
-        let state = Arc::new(crate::modes::thread_state::ThreadModeState::new());
-        let ctx = make_mode_ctx(Some(registry), Arc::clone(&state));
-        let msg = make_channel_msg("<@UBOT> pm", Some("ts1"));
-        assert_eq!(resolve_thread_mode(&ctx, &msg), vec!["pm".to_string()]);
-        assert!(state.get_modes("ts1").contains(&"pm".to_string()));
-    }
-
-    #[test]
-    fn resolve_thread_mode_unknown_mode_name_returns_empty() {
-        let ws = make_workspace();
-        let registry = make_registry_with_pm_mode(ws.path());
-        let state = Arc::new(crate::modes::thread_state::ThreadModeState::new());
-        let ctx = make_mode_ctx(Some(registry), state);
-        let msg = make_channel_msg("<@UBOT> notamode", Some("ts1"));
-        assert!(resolve_thread_mode(&ctx, &msg).is_empty());
-    }
-
-    #[test]
-    fn resolve_thread_mode_uses_persisted_mode_for_thread() {
-        let ws = make_workspace();
-        let registry = make_registry_with_pm_mode(ws.path());
-        let state = Arc::new(crate::modes::thread_state::ThreadModeState::new());
-        state.add_mode("ts1", "pm".to_string());
-        let ctx = make_mode_ctx(Some(registry), state);
-        // Plain message in a thread that already has "pm" active
-        let msg = make_channel_msg("create an issue", Some("ts1"));
-        assert_eq!(resolve_thread_mode(&ctx, &msg), vec!["pm".to_string()]);
-    }
-
-    #[test]
-    fn resolve_thread_mode_activations_are_additive() {
-        let ws = make_workspace();
-        let registry = make_registry_with_pm_mode(ws.path());
-        let state = Arc::new(crate::modes::thread_state::ThreadModeState::new());
-        state.add_mode("ts1", "pm".to_string());
-        let ctx = make_mode_ctx(Some(registry), Arc::clone(&state));
-        // Activating "pm" again in the same thread (idempotent) still returns just ["pm"]
-        let msg = make_channel_msg("<@UBOT> pm", Some("ts1"));
-        let modes = resolve_thread_mode(&ctx, &msg);
-        assert_eq!(modes, vec!["pm".to_string()]);
-        assert_eq!(state.active_count(), 1, "still only one thread tracked");
-    }
-
-    // ── C-3: apply_mode_identity ──────────────────────────────────
-
-    #[test]
-    fn apply_mode_identity_none_vi_returns_message_unchanged() {
-        let msg = traits::SendMessage::new("hello", "C123");
-        let result = apply_mode_identity(msg, None);
-        assert_eq!(result.username, None);
-        assert_eq!(result.icon_emoji, None);
-        assert_eq!(result.content, "hello");
-    }
-
-    #[test]
-    fn apply_mode_identity_some_vi_sets_username_and_emoji() {
-        let vi = Some(crate::config::VisualIdentityConfig {
-            username: Some("PM Bot".to_string()),
-            icon_emoji: Some(":clipboard:".to_string()),
-        });
-        let msg = traits::SendMessage::new("hello", "C123");
-        let result = apply_mode_identity(msg, vi.as_ref());
-        assert_eq!(result.username, Some("PM Bot".to_string()));
-        assert_eq!(result.icon_emoji, Some(":clipboard:".to_string()));
-    }
-
-    #[test]
-    fn apply_mode_identity_vi_with_none_fields_passes_nones() {
-        let vi = Some(crate::config::VisualIdentityConfig {
-            username: None,
-            icon_emoji: None,
-        });
-        let msg = traits::SendMessage::new("hello", "C123");
-        let result = apply_mode_identity(msg, vi.as_ref());
-        assert_eq!(result.username, None);
-        assert_eq!(result.icon_emoji, None);
     }
 
     // ── C-3: user_facing_llm_error ───────────────────────────────
