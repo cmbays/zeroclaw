@@ -35,6 +35,7 @@ pub mod slack;
 pub mod telegram;
 pub mod traits;
 pub mod transcription;
+pub mod wati;
 pub mod whatsapp;
 #[cfg(feature = "whatsapp-web")]
 pub mod whatsapp_storage;
@@ -61,6 +62,7 @@ pub use signal::SignalChannel;
 pub use slack::SlackChannel;
 pub use telegram::TelegramChannel;
 pub use traits::{Channel, SendMessage};
+pub use wati::WatiChannel;
 pub use whatsapp::WhatsAppChannel;
 #[cfg(feature = "whatsapp-web")]
 pub use whatsapp_web::WhatsAppWebChannel;
@@ -149,6 +151,7 @@ enum ChannelRuntimeCommand {
     SetProvider(String),
     ShowModel,
     SetModel(String),
+    NewSession,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -221,7 +224,6 @@ struct ChannelRuntimeContext {
     multimodal: crate::config::MultimodalConfig,
     hooks: Option<Arc<crate::hooks::HookRunner>>,
     non_cli_excluded_tools: Arc<Vec<String>>,
-    global_tool_allowlist: Arc<Vec<String>>,
 }
 
 #[derive(Clone)]
@@ -258,11 +260,19 @@ impl InFlightTaskCompletion {
 }
 
 fn conversation_memory_key(msg: &traits::ChannelMessage) -> String {
-    format!("{}_{}_{}", msg.channel, msg.sender, msg.id)
+    // Include thread_ts for per-topic memory isolation in forum groups
+    match &msg.thread_ts {
+        Some(tid) => format!("{}_{}_{}_{}", msg.channel, tid, msg.sender, msg.id),
+        None => format!("{}_{}_{}", msg.channel, msg.sender, msg.id),
+    }
 }
 
 fn conversation_history_key(msg: &traits::ChannelMessage) -> String {
-    format!("{}_{}", msg.channel, msg.sender)
+    // Include thread_ts for per-topic session isolation in forum groups
+    match &msg.thread_ts {
+        Some(tid) => format!("{}_{}_{}", msg.channel, tid, msg.sender),
+        None => format!("{}_{}", msg.channel, msg.sender),
+    }
 }
 
 fn interruption_scope_key(msg: &traits::ChannelMessage) -> String {
@@ -405,16 +415,33 @@ fn channel_delivery_instructions(channel_name: &str) -> Option<&'static str> {
     }
 }
 
-fn build_channel_system_prompt(base_prompt: &str, channel_name: &str) -> String {
+fn build_channel_system_prompt(
+    base_prompt: &str,
+    channel_name: &str,
+    reply_target: &str,
+) -> String {
+    let mut prompt = base_prompt.to_string();
+
     if let Some(instructions) = channel_delivery_instructions(channel_name) {
-        if base_prompt.is_empty() {
-            instructions.to_string()
+        if prompt.is_empty() {
+            prompt = instructions.to_string();
         } else {
-            format!("{base_prompt}\n\n{instructions}")
+            prompt = format!("{prompt}\n\n{instructions}");
         }
-    } else {
-        base_prompt.to_string()
     }
+
+    if !reply_target.is_empty() {
+        let context = format!(
+            "\n\nChannel context: You are currently responding on channel={channel_name}, \
+             reply_target={reply_target}. When scheduling delayed messages or reminders \
+             via cron_add for this conversation, use delivery={{\"mode\":\"announce\",\
+             \"channel\":\"{channel_name}\",\"to\":\"{reply_target}\"}} so the message \
+             reaches the user."
+        );
+        prompt.push_str(&context);
+    }
+
+    prompt
 }
 
 fn normalize_cached_channel_turns(turns: Vec<ChatMessage>) -> Vec<ChatMessage> {
@@ -490,6 +517,7 @@ fn parse_runtime_command(channel_name: &str, content: &str) -> Option<ChannelRun
                 Some(ChannelRuntimeCommand::SetModel(model))
             }
         }
+        "/new" => Some(ChannelRuntimeCommand::NewSession),
         _ => None,
     }
 }
@@ -819,25 +847,6 @@ fn is_context_window_overflow_error(err: &anyhow::Error) -> bool {
     .any(|hint| lower.contains(hint))
 }
 
-/// Produce a user-facing error message for LLM failures.
-///
-/// Translates raw provider error strings into concise, actionable messages
-/// suitable for display in chat channels. Handles Ollama-specific conditions
-/// (service not running, model not pulled) and falls back to the sanitized
-/// error for everything else.
-fn user_facing_llm_error(err: &anyhow::Error) -> String {
-    let msg = err.to_string();
-    if msg.contains("Is Ollama running") || msg.contains("ollama serve") {
-        "⚠️ I can't reach the reasoning engine right now. Is Ollama running? (`ollama serve`)"
-            .to_string()
-    } else if msg.contains("not found, try pulling it first") || msg.contains("pull it first") {
-        "⚠️ The AI model isn't loaded yet. Pull it first (e.g., `ollama pull qwen3:14b`)."
-            .to_string()
-    } else {
-        format!("⚠️ Error: {}", providers::sanitize_api_error(&msg))
-    }
-}
-
 fn load_cached_model_preview(workspace_dir: &Path, provider_name: &str) -> Vec<String> {
     let cache_path = workspace_dir.join("state").join(MODEL_CACHE_FILE);
     let Ok(raw) = std::fs::read_to_string(cache_path) else {
@@ -1045,6 +1054,10 @@ async fn handle_runtime_command_if_needed(
                     current.provider
                 )
             }
+        }
+        ChannelRuntimeCommand::NewSession => {
+            clear_sender_history(ctx, &sender_key);
+            "Conversation history cleared. Starting fresh.".to_string()
         }
     };
 
@@ -1542,7 +1555,28 @@ async fn process_channel_message(
         return;
     }
 
-    // ── Shared setup ────────────────────────────────────────
+    let history_key = conversation_history_key(&msg);
+    let route = get_route_selection(ctx.as_ref(), &history_key);
+    let runtime_defaults = runtime_defaults_snapshot(ctx.as_ref());
+    let active_provider = match get_or_create_provider(ctx.as_ref(), &route.provider).await {
+        Ok(provider) => provider,
+        Err(err) => {
+            let safe_err = providers::sanitize_api_error(&err.to_string());
+            let message = format!(
+                "⚠️ Failed to initialize provider `{}`. Please run `/models` to choose another provider.\nDetails: {safe_err}",
+                route.provider
+            );
+            if let Some(channel) = target_channel.as_ref() {
+                let _ = channel
+                    .send(
+                        &SendMessage::new(message, &msg.reply_target)
+                            .in_thread(msg.thread_ts.clone()),
+                    )
+                    .await;
+            }
+            return;
+        }
+    };
     if ctx.auto_save_memory && msg.content.chars().count() >= AUTOSAVE_MIN_MESSAGE_CHARS {
         let autosave_key = conversation_memory_key(&msg);
         let _ = ctx
@@ -1559,7 +1593,111 @@ async fn process_channel_message(
     println!("  ⏳ Processing message...");
     let started_at = Instant::now();
 
-    // React with 👀 to acknowledge the incoming message (once, before all modes run).
+    let had_prior_history = ctx
+        .conversation_histories
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&history_key)
+        .is_some_and(|turns| !turns.is_empty());
+
+    // Preserve user turn before the LLM call so interrupted requests keep context.
+    append_sender_turn(ctx.as_ref(), &history_key, ChatMessage::user(&msg.content));
+
+    // Build history from per-sender conversation cache.
+    let prior_turns_raw = ctx
+        .conversation_histories
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&history_key)
+        .cloned()
+        .unwrap_or_default();
+    let mut prior_turns = normalize_cached_channel_turns(prior_turns_raw);
+
+    // Only enrich with memory context when there is no prior conversation
+    // history. Follow-up turns already include context from previous messages.
+    if !had_prior_history {
+        let memory_context =
+            build_memory_context(ctx.memory.as_ref(), &msg.content, ctx.min_relevance_score).await;
+        if let Some(last_turn) = prior_turns.last_mut() {
+            if last_turn.role == "user" && !memory_context.is_empty() {
+                last_turn.content = format!("{memory_context}{}", msg.content);
+            }
+        }
+    }
+
+    let system_prompt =
+        build_channel_system_prompt(ctx.system_prompt.as_str(), &msg.channel, &msg.reply_target);
+    let mut history = vec![ChatMessage::system(system_prompt)];
+    history.extend(prior_turns);
+    let use_streaming = target_channel
+        .as_ref()
+        .is_some_and(|ch| ch.supports_draft_updates());
+
+    tracing::debug!(
+        channel = %msg.channel,
+        has_target_channel = target_channel.is_some(),
+        use_streaming,
+        supports_draft = target_channel.as_ref().map_or(false, |ch| ch.supports_draft_updates()),
+        "Draft streaming decision"
+    );
+
+    let (delta_tx, delta_rx) = if use_streaming {
+        let (tx, rx) = tokio::sync::mpsc::channel::<String>(64);
+        (Some(tx), Some(rx))
+    } else {
+        (None, None)
+    };
+
+    let draft_message_id = if use_streaming {
+        if let Some(channel) = target_channel.as_ref() {
+            match channel
+                .send_draft(
+                    &SendMessage::new("...", &msg.reply_target).in_thread(msg.thread_ts.clone()),
+                )
+                .await
+            {
+                Ok(id) => id,
+                Err(e) => {
+                    tracing::debug!("Failed to send draft on {}: {e}", channel.name());
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let draft_updater = if let (Some(mut rx), Some(draft_id_ref), Some(channel_ref)) = (
+        delta_rx,
+        draft_message_id.as_deref(),
+        target_channel.as_ref(),
+    ) {
+        let channel = Arc::clone(channel_ref);
+        let reply_target = msg.reply_target.clone();
+        let draft_id = draft_id_ref.to_string();
+        Some(tokio::spawn(async move {
+            let mut accumulated = String::new();
+            while let Some(delta) = rx.recv().await {
+                if delta == crate::agent::loop_::DRAFT_CLEAR_SENTINEL {
+                    accumulated.clear();
+                    continue;
+                }
+                accumulated.push_str(&delta);
+                if let Err(e) = channel
+                    .update_draft(&reply_target, &draft_id, &accumulated)
+                    .await
+                {
+                    tracing::debug!("Draft update failed: {e}");
+                }
+            }
+        }))
+    } else {
+        None
+    };
+
+    // React with 👀 to acknowledge the incoming message
     if let Some(channel) = target_channel.as_ref() {
         if let Err(e) = channel
             .add_reaction(&msg.reply_target, &msg.id, "\u{1F440}")
@@ -1579,218 +1717,220 @@ async fn process_channel_message(
         _ => None,
     };
 
+    // Record history length before tool loop so we can extract tool context after.
+    let history_len_before_tools = history.len();
+
     enum LlmExecutionResult {
         Completed(Result<Result<String, anyhow::Error>, tokio::time::error::Elapsed>),
         Cancelled,
     }
 
-    let mut had_any_success = false;
+    let timeout_budget_secs =
+        channel_message_timeout_budget_secs(ctx.message_timeout_secs, ctx.max_tool_iterations);
+    let llm_result = tokio::select! {
+        () = cancellation_token.cancelled() => LlmExecutionResult::Cancelled,
+        result = tokio::time::timeout(
+            Duration::from_secs(timeout_budget_secs),
+            run_tool_call_loop(
+                active_provider.as_ref(),
+                &mut history,
+                ctx.tools_registry.as_ref(),
+                ctx.observer.as_ref(),
+                route.provider.as_str(),
+                route.model.as_str(),
+                runtime_defaults.temperature,
+                true,
+                None,
+                msg.channel.as_str(),
+                &ctx.multimodal,
+                ctx.max_tool_iterations,
+                Some(cancellation_token.clone()),
+                delta_tx,
+                ctx.hooks.as_deref(),
+                if msg.channel == "cli" {
+                    &[]
+                } else {
+                    ctx.non_cli_excluded_tools.as_ref()
+                },
+            ),
+        ) => LlmExecutionResult::Completed(result),
+    };
 
-    {
-        let history_key = conversation_history_key(&msg);
-        let route = get_route_selection(ctx.as_ref(), &history_key);
-        let runtime_defaults = runtime_defaults_snapshot(ctx.as_ref());
-        let effective_temperature = runtime_defaults.temperature;
-        let active_provider = match get_or_create_provider(ctx.as_ref(), &route.provider).await {
-            Ok(provider) => provider,
-            Err(err) => {
-                let safe_err = providers::sanitize_api_error(&err.to_string());
-                let message = format!(
-                    "⚠️ Failed to initialize provider `{}`. Please run `/models` to choose another provider.\nDetails: {safe_err}",
-                    route.provider
-                );
-                if let Some(channel) = target_channel.as_ref() {
-                    let _ = channel
-                        .send(
-                            &SendMessage::new(message, &msg.reply_target)
-                                .in_thread(msg.thread_ts.clone()),
-                        )
-                        .await;
-                }
-                return;
-            }
-        };
+    if let Some(handle) = draft_updater {
+        let _ = handle.await;
+    }
 
-        let had_prior_history = ctx
-            .conversation_histories
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&history_key)
-            .is_some_and(|turns| !turns.is_empty());
+    if let Some(token) = typing_cancellation.as_ref() {
+        token.cancel();
+    }
+    if let Some(handle) = typing_task {
+        log_worker_join_result(handle.await);
+    }
 
-        // Preserve user turn before the LLM call so interrupted requests keep context.
-        append_sender_turn(ctx.as_ref(), &history_key, ChatMessage::user(&msg.content));
+    let reaction_done_emoji = match &llm_result {
+        LlmExecutionResult::Completed(Ok(Ok(_))) => "\u{2705}", // ✅
+        _ => "\u{26A0}\u{FE0F}",                                // ⚠️
+    };
 
-        // Build history from per-mode conversation cache.
-        let prior_turns_raw = ctx
-            .conversation_histories
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&history_key)
-            .cloned()
-            .unwrap_or_default();
-        let mut prior_turns = normalize_cached_channel_turns(prior_turns_raw);
-
-        // Only enrich with memory context when there is no prior conversation
-        // history. Follow-up turns already include context from previous messages.
-        if !had_prior_history {
-            let memory_context =
-                build_memory_context(ctx.memory.as_ref(), &msg.content, ctx.min_relevance_score)
-                    .await;
-            if let Some(last_turn) = prior_turns.last_mut() {
-                if last_turn.role == "user" && !memory_context.is_empty() {
-                    last_turn.content = format!("{memory_context}{}", msg.content);
+    match llm_result {
+        LlmExecutionResult::Cancelled => {
+            tracing::info!(
+                channel = %msg.channel,
+                sender = %msg.sender,
+                "Cancelled in-flight channel request due to newer message"
+            );
+            runtime_trace::record_event(
+                "channel_message_cancelled",
+                Some(msg.channel.as_str()),
+                Some(route.provider.as_str()),
+                Some(route.model.as_str()),
+                None,
+                Some(false),
+                Some("cancelled due to newer inbound message"),
+                serde_json::json!({
+                    "sender": msg.sender,
+                    "elapsed_ms": started_at.elapsed().as_millis(),
+                }),
+            );
+            if let (Some(channel), Some(draft_id)) =
+                (target_channel.as_ref(), draft_message_id.as_deref())
+            {
+                if let Err(err) = channel.cancel_draft(&msg.reply_target, draft_id).await {
+                    tracing::debug!("Failed to cancel draft on {}: {err}", channel.name());
                 }
             }
         }
+        LlmExecutionResult::Completed(Ok(Ok(response))) => {
+            // ── Hook: on_message_sending (modifying) ─────────
+            let mut outbound_response = response;
+            if let Some(hooks) = &ctx.hooks {
+                match hooks
+                    .run_on_message_sending(
+                        msg.channel.clone(),
+                        msg.reply_target.clone(),
+                        outbound_response.clone(),
+                    )
+                    .await
+                {
+                    crate::hooks::HookResult::Cancel(reason) => {
+                        tracing::info!(%reason, "outgoing message suppressed by hook");
+                        return;
+                    }
+                    crate::hooks::HookResult::Continue((
+                        hook_channel,
+                        hook_recipient,
+                        mut modified_content,
+                    )) => {
+                        if hook_channel != msg.channel || hook_recipient != msg.reply_target {
+                            tracing::warn!(
+                                from_channel = %msg.channel,
+                                from_recipient = %msg.reply_target,
+                                to_channel = %hook_channel,
+                                to_recipient = %hook_recipient,
+                                "on_message_sending attempted to rewrite channel routing; only content mutation is applied"
+                            );
+                        }
 
-        let base_prompt = ctx.system_prompt.as_str();
-        let system_prompt = build_channel_system_prompt(base_prompt, &msg.channel);
-        let mut history = vec![ChatMessage::system(system_prompt)];
-        history.extend(prior_turns);
+                        let modified_len = modified_content.chars().count();
+                        if modified_len > CHANNEL_HOOK_MAX_OUTBOUND_CHARS {
+                            tracing::warn!(
+                                limit = CHANNEL_HOOK_MAX_OUTBOUND_CHARS,
+                                attempted = modified_len,
+                                "hook-modified outbound content exceeded limit; truncating"
+                            );
+                            modified_content = truncate_with_ellipsis(
+                                &modified_content,
+                                CHANNEL_HOOK_MAX_OUTBOUND_CHARS,
+                            );
+                        }
 
-        let use_streaming = target_channel
-            .as_ref()
-            .is_some_and(|ch| ch.supports_draft_updates());
+                        if modified_content != outbound_response {
+                            tracing::info!(
+                                channel = %msg.channel,
+                                sender = %msg.sender,
+                                before_len = outbound_response.chars().count(),
+                                after_len = modified_content.chars().count(),
+                                "outgoing message content modified by hook"
+                            );
+                        }
 
-        tracing::debug!(
-            channel = %msg.channel,
-            has_target_channel = target_channel.is_some(),
-            use_streaming,
-            supports_draft = target_channel.as_ref().map_or(false, |ch| ch.supports_draft_updates()),
-            "Draft streaming decision"
-        );
+                        outbound_response = modified_content;
+                    }
+                }
+            }
 
-        let (delta_tx, delta_rx) = if use_streaming {
-            let (tx, rx) = tokio::sync::mpsc::channel::<String>(64);
-            (Some(tx), Some(rx))
-        } else {
-            (None, None)
-        };
+            let sanitized_response =
+                sanitize_channel_response(&outbound_response, ctx.tools_registry.as_ref());
+            let delivered_response = if sanitized_response.is_empty()
+                && !outbound_response.trim().is_empty()
+            {
+                "I encountered malformed tool-call output and could not produce a safe reply. Please try again.".to_string()
+            } else {
+                sanitized_response
+            };
+            runtime_trace::record_event(
+                "channel_message_outbound",
+                Some(msg.channel.as_str()),
+                Some(route.provider.as_str()),
+                Some(route.model.as_str()),
+                None,
+                Some(true),
+                None,
+                serde_json::json!({
+                    "sender": msg.sender,
+                    "elapsed_ms": started_at.elapsed().as_millis(),
+                    "response": scrub_credentials(&delivered_response),
+                }),
+            );
 
-        let draft_message_id = if use_streaming {
+            // Extract condensed tool-use context from the history messages
+            // added during run_tool_call_loop, so the LLM retains awareness
+            // of what it did on subsequent turns.
+            let tool_summary = extract_tool_context_summary(&history, history_len_before_tools);
+            let history_response = if tool_summary.is_empty() || msg.channel == "telegram" {
+                delivered_response.clone()
+            } else {
+                format!("{tool_summary}\n{delivered_response}")
+            };
+
+            append_sender_turn(
+                ctx.as_ref(),
+                &history_key,
+                ChatMessage::assistant(&history_response),
+            );
+            println!(
+                "  🤖 Reply ({}ms): {}",
+                started_at.elapsed().as_millis(),
+                truncate_with_ellipsis(&delivered_response, 80)
+            );
             if let Some(channel) = target_channel.as_ref() {
-                match channel
-                    .send_draft(
-                        &SendMessage::new("...", &msg.reply_target)
+                if let Some(ref draft_id) = draft_message_id {
+                    if let Err(e) = channel
+                        .finalize_draft(&msg.reply_target, draft_id, &delivered_response)
+                        .await
+                    {
+                        tracing::warn!("Failed to finalize draft: {e}; sending as new message");
+                        let _ = channel
+                            .send(
+                                &SendMessage::new(&delivered_response, &msg.reply_target)
+                                    .in_thread(msg.thread_ts.clone()),
+                            )
+                            .await;
+                    }
+                } else if let Err(e) = channel
+                    .send(
+                        &SendMessage::new(delivered_response, &msg.reply_target)
                             .in_thread(msg.thread_ts.clone()),
                     )
                     .await
                 {
-                    Ok(id) => id,
-                    Err(e) => {
-                        tracing::debug!("Failed to send draft on {}: {e}", channel.name());
-                        None
-                    }
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        let draft_updater = if let (Some(mut rx), Some(draft_id_ref), Some(channel_ref)) = (
-            delta_rx,
-            draft_message_id.as_deref(),
-            target_channel.as_ref(),
-        ) {
-            let channel = Arc::clone(channel_ref);
-            let reply_target = msg.reply_target.clone();
-            let draft_id = draft_id_ref.to_string();
-            Some(tokio::spawn(async move {
-                let mut accumulated = String::new();
-                while let Some(delta) = rx.recv().await {
-                    if delta == crate::agent::loop_::DRAFT_CLEAR_SENTINEL {
-                        accumulated.clear();
-                        continue;
-                    }
-                    accumulated.push_str(&delta);
-                    if let Err(e) = channel
-                        .update_draft(&reply_target, &draft_id, &accumulated)
-                        .await
-                    {
-                        tracing::debug!("Draft update failed: {e}");
-                    }
-                }
-            }))
-        } else {
-            None
-        };
-
-        // Resolve the effective tool exclusion list:
-        // 1. Use the global config tool_allowlist if non-empty.
-        // 2. Merge with non_cli_excluded_tools (channel-level exclusions).
-        let effective_allowlist: Option<&Vec<String>> = if ctx.global_tool_allowlist.is_empty() {
-            None
-        } else {
-            Some(&ctx.global_tool_allowlist)
-        };
-        let mode_excluded: Vec<String> = match effective_allowlist {
-            None => Vec::new(),
-            Some(allowlist) => {
-                let allowed: std::collections::HashSet<&str> =
-                    allowlist.iter().map(String::as_str).collect();
-                ctx.tools_registry
-                    .iter()
-                    .map(|t| t.name())
-                    .filter(|name| !allowed.contains(name))
-                    .map(str::to_string)
-                    .collect()
-            }
-        };
-        let channel_excluded: &[String] = if msg.channel == "cli" {
-            &[]
-        } else {
-            ctx.non_cli_excluded_tools.as_ref()
-        };
-        let effective_excluded: Vec<String> = {
-            let mut v = mode_excluded;
-            for e in channel_excluded {
-                if !v.contains(e) {
-                    v.push(e.clone());
+                    eprintln!("  ❌ Failed to reply on {}: {e}", channel.name());
                 }
             }
-            v
-        };
-
-        let timeout_budget_secs =
-            channel_message_timeout_budget_secs(ctx.message_timeout_secs, ctx.max_tool_iterations);
-
-        // Record history length before tool loop so we can extract tool context after.
-        let history_len_before_tools = history.len();
-
-        let llm_result = tokio::select! {
-            () = cancellation_token.cancelled() => LlmExecutionResult::Cancelled,
-            result = tokio::time::timeout(
-                Duration::from_secs(timeout_budget_secs),
-                run_tool_call_loop(
-                    active_provider.as_ref(),
-                    &mut history,
-                    ctx.tools_registry.as_ref(),
-                    ctx.observer.as_ref(),
-                    route.provider.as_str(),
-                    route.model.as_str(),
-                    effective_temperature,
-                    true,
-                    None,
-                    msg.channel.as_str(),
-                    &ctx.multimodal,
-                    ctx.max_tool_iterations,
-                    Some(cancellation_token.clone()),
-                    delta_tx,
-                    ctx.hooks.as_deref(),
-                    &effective_excluded,
-                ),
-            ) => LlmExecutionResult::Completed(result),
-        };
-
-        if let Some(handle) = draft_updater {
-            let _ = handle.await;
         }
-
-        match llm_result {
-            LlmExecutionResult::Cancelled => {
+        LlmExecutionResult::Completed(Ok(Err(e))) => {
+            if crate::agent::loop_::is_tool_loop_cancelled(&e) || cancellation_token.is_cancelled()
+            {
                 tracing::info!(
                     channel = %msg.channel,
                     sender = %msg.sender,
@@ -1803,7 +1943,7 @@ async fn process_channel_message(
                     Some(route.model.as_str()),
                     None,
                     Some(false),
-                    Some("cancelled due to newer inbound message"),
+                    Some("cancelled during tool-call loop"),
                     serde_json::json!({
                         "sender": msg.sender,
                         "elapsed_ms": started_at.elapsed().as_millis(),
@@ -1816,299 +1956,33 @@ async fn process_channel_message(
                         tracing::debug!("Failed to cancel draft on {}: {err}", channel.name());
                     }
                 }
-            }
-            LlmExecutionResult::Completed(Ok(Ok(response))) => {
-                had_any_success = true;
-                // ── Hook: on_message_sending (modifying) ─────────
-                let mut outbound_response = response;
-                let hook_cancelled = if let Some(hooks) = &ctx.hooks {
-                    match hooks
-                        .run_on_message_sending(
-                            msg.channel.clone(),
-                            msg.reply_target.clone(),
-                            outbound_response.clone(),
-                        )
-                        .await
-                    {
-                        crate::hooks::HookResult::Cancel(reason) => {
-                            tracing::info!(%reason, "outgoing message suppressed by hook");
-                            true
-                        }
-                        crate::hooks::HookResult::Continue((
-                            hook_channel,
-                            hook_recipient,
-                            mut modified_content,
-                        )) => {
-                            if hook_channel != msg.channel || hook_recipient != msg.reply_target {
-                                tracing::warn!(
-                                    from_channel = %msg.channel,
-                                    from_recipient = %msg.reply_target,
-                                    to_channel = %hook_channel,
-                                    to_recipient = %hook_recipient,
-                                    "on_message_sending attempted to rewrite channel routing; only content mutation is applied"
-                                );
-                            }
-
-                            let modified_len = modified_content.chars().count();
-                            if modified_len > CHANNEL_HOOK_MAX_OUTBOUND_CHARS {
-                                tracing::warn!(
-                                    limit = CHANNEL_HOOK_MAX_OUTBOUND_CHARS,
-                                    attempted = modified_len,
-                                    "hook-modified outbound content exceeded limit; truncating"
-                                );
-                                modified_content = truncate_with_ellipsis(
-                                    &modified_content,
-                                    CHANNEL_HOOK_MAX_OUTBOUND_CHARS,
-                                );
-                            }
-
-                            if modified_content != outbound_response {
-                                tracing::info!(
-                                    channel = %msg.channel,
-                                    sender = %msg.sender,
-                                    before_len = outbound_response.chars().count(),
-                                    after_len = modified_content.chars().count(),
-                                    "outgoing message content modified by hook"
-                                );
-                            }
-
-                            outbound_response = modified_content;
-                            false
-                        }
-                    }
+            } else if is_context_window_overflow_error(&e) {
+                let compacted = compact_sender_history(ctx.as_ref(), &history_key);
+                let error_text = if compacted {
+                    "⚠️ Context window exceeded for this conversation. I compacted recent history and kept the latest context. Please resend your last message."
                 } else {
-                    false
+                    "⚠️ Context window exceeded for this conversation. Please resend your last message."
                 };
-
-                if !hook_cancelled {
-                    let sanitized_response =
-                        sanitize_channel_response(&outbound_response, ctx.tools_registry.as_ref());
-                    let delivered_response = if sanitized_response.is_empty()
-                        && !outbound_response.trim().is_empty()
-                    {
-                        "I encountered malformed tool-call output and could not produce a safe reply. Please try again.".to_string()
-                    } else {
-                        sanitized_response
-                    };
-                    runtime_trace::record_event(
-                        "channel_message_outbound",
-                        Some(msg.channel.as_str()),
-                        Some(route.provider.as_str()),
-                        Some(route.model.as_str()),
-                        None,
-                        Some(true),
-                        None,
-                        serde_json::json!({
-                            "sender": msg.sender,
-                            "elapsed_ms": started_at.elapsed().as_millis(),
-                            "response": scrub_credentials(&delivered_response),
-                        }),
-                    );
-
-                    // Extract condensed tool-use context from the history messages
-                    // added during run_tool_call_loop, so the LLM retains awareness
-                    // of what it did on subsequent turns.
-                    let tool_summary =
-                        extract_tool_context_summary(&history, history_len_before_tools);
-                    let history_response = if tool_summary.is_empty() || msg.channel == "telegram" {
-                        delivered_response.clone()
-                    } else {
-                        format!("{tool_summary}\n{delivered_response}")
-                    };
-
-                    append_sender_turn(
-                        ctx.as_ref(),
-                        &history_key,
-                        ChatMessage::assistant(&history_response),
-                    );
-                    println!(
-                        "  🤖 Reply ({}ms): {}",
-                        started_at.elapsed().as_millis(),
-                        truncate_with_ellipsis(&delivered_response, 80)
-                    );
-                    if let Some(channel) = target_channel.as_ref() {
-                        if let Some(ref draft_id) = draft_message_id {
-                            if let Err(e) = channel
-                                .finalize_draft(&msg.reply_target, draft_id, &delivered_response)
-                                .await
-                            {
-                                tracing::warn!(
-                                    "Failed to finalize draft: {e}; sending as new message"
-                                );
-                                let _ = channel
-                                    .send(
-                                        &SendMessage::new(&delivered_response, &msg.reply_target)
-                                            .in_thread(msg.thread_ts.clone()),
-                                    )
-                                    .await;
-                            }
-                        } else if let Err(e) = channel
-                            .send(
-                                &SendMessage::new(delivered_response, &msg.reply_target)
-                                    .in_thread(msg.thread_ts.clone()),
-                            )
-                            .await
-                        {
-                            eprintln!("  ❌ Failed to reply on {}: {e}", channel.name());
-                        }
-                    }
-                } // end if !hook_cancelled
-            }
-            LlmExecutionResult::Completed(Ok(Err(e))) => {
-                if crate::agent::loop_::is_tool_loop_cancelled(&e)
-                    || cancellation_token.is_cancelled()
-                {
-                    tracing::info!(
-                        channel = %msg.channel,
-                        sender = %msg.sender,
-                        "Cancelled in-flight channel request due to newer message"
-                    );
-                    runtime_trace::record_event(
-                        "channel_message_cancelled",
-                        Some(msg.channel.as_str()),
-                        Some(route.provider.as_str()),
-                        Some(route.model.as_str()),
-                        None,
-                        Some(false),
-                        Some("cancelled during tool-call loop"),
-                        serde_json::json!({
-                            "sender": msg.sender,
-                            "elapsed_ms": started_at.elapsed().as_millis(),
-                        }),
-                    );
-                    if let (Some(channel), Some(draft_id)) =
-                        (target_channel.as_ref(), draft_message_id.as_deref())
-                    {
-                        if let Err(err) = channel.cancel_draft(&msg.reply_target, draft_id).await {
-                            tracing::debug!("Failed to cancel draft on {}: {err}", channel.name());
-                        }
-                    }
-                } else if is_context_window_overflow_error(&e) {
-                    let compacted = compact_sender_history(ctx.as_ref(), &history_key);
-                    let error_text = if compacted {
-                        "⚠️ Context window exceeded for this conversation. I compacted recent history and kept the latest context. Please resend your last message."
-                    } else {
-                        "⚠️ Context window exceeded for this conversation. Please resend your last message."
-                    };
-                    eprintln!(
-                        "  ⚠️ Context window exceeded after {}ms; sender history compacted={}",
-                        started_at.elapsed().as_millis(),
-                        compacted
-                    );
-                    runtime_trace::record_event(
-                        "channel_message_error",
-                        Some(msg.channel.as_str()),
-                        Some(route.provider.as_str()),
-                        Some(route.model.as_str()),
-                        None,
-                        Some(false),
-                        Some("context window exceeded"),
-                        serde_json::json!({
-                            "sender": msg.sender,
-                            "elapsed_ms": started_at.elapsed().as_millis(),
-                            "history_compacted": compacted,
-                        }),
-                    );
-                    if let Some(channel) = target_channel.as_ref() {
-                        if let Some(ref draft_id) = draft_message_id {
-                            let _ = channel
-                                .finalize_draft(&msg.reply_target, draft_id, error_text)
-                                .await;
-                        } else {
-                            let _ = channel
-                                .send(
-                                    &SendMessage::new(error_text, &msg.reply_target)
-                                        .in_thread(msg.thread_ts.clone()),
-                                )
-                                .await;
-                        }
-                    }
-                } else {
-                    eprintln!(
-                        "  ❌ LLM error after {}ms: {e}",
-                        started_at.elapsed().as_millis()
-                    );
-                    let safe_error = providers::sanitize_api_error(&e.to_string());
-                    runtime_trace::record_event(
-                        "channel_message_error",
-                        Some(msg.channel.as_str()),
-                        Some(route.provider.as_str()),
-                        Some(route.model.as_str()),
-                        None,
-                        Some(false),
-                        Some(&safe_error),
-                        serde_json::json!({
-                            "sender": msg.sender,
-                            "elapsed_ms": started_at.elapsed().as_millis(),
-                        }),
-                    );
-                    let should_rollback_user_turn = e
-                        .downcast_ref::<providers::ProviderCapabilityError>()
-                        .is_some_and(|capability| {
-                            capability.capability.eq_ignore_ascii_case("vision")
-                        });
-                    let rolled_back = should_rollback_user_turn
-                        && rollback_orphan_user_turn(ctx.as_ref(), &history_key, &msg.content);
-
-                    if !rolled_back {
-                        // Close the orphan user turn so subsequent messages don't
-                        // inherit this failed request as unfinished context.
-                        append_sender_turn(
-                            ctx.as_ref(),
-                            &history_key,
-                            ChatMessage::assistant("[Task failed — not continuing this request]"),
-                        );
-                    }
-                    if let Some(channel) = target_channel.as_ref() {
-                        let error_text = user_facing_llm_error(&e);
-                        if let Some(ref draft_id) = draft_message_id {
-                            let _ = channel
-                                .finalize_draft(&msg.reply_target, draft_id, &error_text)
-                                .await;
-                        } else {
-                            let _ = channel
-                                .send(
-                                    &SendMessage::new(error_text, &msg.reply_target)
-                                        .in_thread(msg.thread_ts.clone()),
-                                )
-                                .await;
-                        }
-                    }
-                }
-            }
-            LlmExecutionResult::Completed(Err(_)) => {
-                let timeout_msg = format!(
-                    "LLM response timed out after {}s (base={}s, max_tool_iterations={})",
-                    timeout_budget_secs, ctx.message_timeout_secs, ctx.max_tool_iterations
+                eprintln!(
+                    "  ⚠️ Context window exceeded after {}ms; sender history compacted={}",
+                    started_at.elapsed().as_millis(),
+                    compacted
                 );
                 runtime_trace::record_event(
-                    "channel_message_timeout",
+                    "channel_message_error",
                     Some(msg.channel.as_str()),
                     Some(route.provider.as_str()),
                     Some(route.model.as_str()),
                     None,
                     Some(false),
-                    Some(&timeout_msg),
+                    Some("context window exceeded"),
                     serde_json::json!({
                         "sender": msg.sender,
                         "elapsed_ms": started_at.elapsed().as_millis(),
+                        "history_compacted": compacted,
                     }),
                 );
-                eprintln!(
-                    "  ❌ {} (elapsed: {}ms)",
-                    timeout_msg,
-                    started_at.elapsed().as_millis()
-                );
-                // Close the orphan user turn so subsequent messages don't
-                // inherit this timed-out request as unfinished context.
-                append_sender_turn(
-                    ctx.as_ref(),
-                    &history_key,
-                    ChatMessage::assistant("[Task timed out — not continuing this request]"),
-                );
                 if let Some(channel) = target_channel.as_ref() {
-                    let error_text =
-                        "⚠️ Request timed out while waiting for the model. Please try again.";
                     if let Some(ref draft_id) = draft_message_id {
                         let _ = channel
                             .finalize_draft(&msg.reply_target, draft_id, error_text)
@@ -2122,22 +1996,104 @@ async fn process_channel_message(
                             .await;
                     }
                 }
+            } else {
+                eprintln!(
+                    "  ❌ LLM error after {}ms: {e}",
+                    started_at.elapsed().as_millis()
+                );
+                let safe_error = providers::sanitize_api_error(&e.to_string());
+                runtime_trace::record_event(
+                    "channel_message_error",
+                    Some(msg.channel.as_str()),
+                    Some(route.provider.as_str()),
+                    Some(route.model.as_str()),
+                    None,
+                    Some(false),
+                    Some(&safe_error),
+                    serde_json::json!({
+                        "sender": msg.sender,
+                        "elapsed_ms": started_at.elapsed().as_millis(),
+                    }),
+                );
+                let should_rollback_user_turn = e
+                    .downcast_ref::<providers::ProviderCapabilityError>()
+                    .is_some_and(|capability| capability.capability.eq_ignore_ascii_case("vision"));
+                let rolled_back = should_rollback_user_turn
+                    && rollback_orphan_user_turn(ctx.as_ref(), &history_key, &msg.content);
+
+                if !rolled_back {
+                    // Close the orphan user turn so subsequent messages don't
+                    // inherit this failed request as unfinished context.
+                    append_sender_turn(
+                        ctx.as_ref(),
+                        &history_key,
+                        ChatMessage::assistant("[Task failed — not continuing this request]"),
+                    );
+                }
+                if let Some(channel) = target_channel.as_ref() {
+                    if let Some(ref draft_id) = draft_message_id {
+                        let _ = channel
+                            .finalize_draft(&msg.reply_target, draft_id, &format!("⚠️ Error: {e}"))
+                            .await;
+                    } else {
+                        let _ = channel
+                            .send(
+                                &SendMessage::new(format!("⚠️ Error: {e}"), &msg.reply_target)
+                                    .in_thread(msg.thread_ts.clone()),
+                            )
+                            .await;
+                    }
+                }
             }
         }
-    } // end dispatch block
-
-    if let Some(token) = typing_cancellation.as_ref() {
-        token.cancel();
+        LlmExecutionResult::Completed(Err(_)) => {
+            let timeout_msg = format!(
+                "LLM response timed out after {}s (base={}s, max_tool_iterations={})",
+                timeout_budget_secs, ctx.message_timeout_secs, ctx.max_tool_iterations
+            );
+            runtime_trace::record_event(
+                "channel_message_timeout",
+                Some(msg.channel.as_str()),
+                Some(route.provider.as_str()),
+                Some(route.model.as_str()),
+                None,
+                Some(false),
+                Some(&timeout_msg),
+                serde_json::json!({
+                    "sender": msg.sender,
+                    "elapsed_ms": started_at.elapsed().as_millis(),
+                }),
+            );
+            eprintln!(
+                "  ❌ {} (elapsed: {}ms)",
+                timeout_msg,
+                started_at.elapsed().as_millis()
+            );
+            // Close the orphan user turn so subsequent messages don't
+            // inherit this timed-out request as unfinished context.
+            append_sender_turn(
+                ctx.as_ref(),
+                &history_key,
+                ChatMessage::assistant("[Task timed out — not continuing this request]"),
+            );
+            if let Some(channel) = target_channel.as_ref() {
+                let error_text =
+                    "⚠️ Request timed out while waiting for the model. Please try again.";
+                if let Some(ref draft_id) = draft_message_id {
+                    let _ = channel
+                        .finalize_draft(&msg.reply_target, draft_id, error_text)
+                        .await;
+                } else {
+                    let _ = channel
+                        .send(
+                            &SendMessage::new(error_text, &msg.reply_target)
+                                .in_thread(msg.thread_ts.clone()),
+                        )
+                        .await;
+                }
+            }
+        }
     }
-    if let Some(handle) = typing_task {
-        log_worker_join_result(handle.await);
-    }
-
-    let reaction_done_emoji = if had_any_success {
-        "\u{2705}" // ✅
-    } else {
-        "\u{26A0}\u{FE0F}" // ⚠️
-    };
 
     // Swap 👀 → ✅ (or ⚠️ on error) to signal processing is complete
     if let Some(channel) = target_channel.as_ref() {
@@ -2890,6 +2846,18 @@ fn collect_configured_channels(
         });
     }
 
+    if let Some(ref wati_cfg) = config.channels_config.wati {
+        channels.push(ConfiguredChannel {
+            display_name: "WATI",
+            channel: Arc::new(WatiChannel::new(
+                wati_cfg.api_token.clone(),
+                wati_cfg.api_url.clone(),
+                wati_cfg.tenant_id.clone(),
+                wati_cfg.allowed_numbers.clone(),
+            )),
+        });
+    }
+
     if let Some(ref nc) = config.channels_config.nextcloud_talk {
         channels.push(ConfiguredChannel {
             display_name: "Nextcloud Talk",
@@ -3049,6 +3017,7 @@ pub async fn doctor_channels(config: Config) -> Result<()> {
     if config.channels_config.webhook.is_some() {
         println!("  ℹ️  Webhook   check via `zeroclaw gateway` then GET /health");
     }
+
     println!();
     println!("Summary: {healthy} healthy, {unhealthy} unhealthy, {timeout} timed out");
     Ok(())
@@ -3060,6 +3029,7 @@ pub async fn start_channels(config: Config) -> Result<()> {
     let provider_name = resolved_default_provider(&config);
     let provider_runtime_options = providers::ProviderRuntimeOptions {
         auth_profile_override: None,
+        provider_api_url: config.api_url.clone(),
         zeroclaw_dir: config.config_path.parent().map(std::path::PathBuf::from),
         secrets_encrypt: config.secrets.encrypt,
         reasoning_enabled: config.runtime.reasoning_enabled,
@@ -3130,6 +3100,7 @@ pub async fn start_channels(config: Config) -> Result<()> {
         composio_entity_id,
         &config.browser,
         &config.http_request,
+        &config.web_fetch,
         &workspace,
         &config.agents,
         config.api_key.as_deref(),
@@ -3169,7 +3140,7 @@ pub async fn start_channels(config: Config) -> Result<()> {
     if config.browser.enabled {
         tool_descs.push((
             "browser_open",
-            "Open approved HTTPS URLs in Brave Browser (allowlist-only, no scraping)",
+            "Open approved HTTPS URLs in system browser (allowlist-only, no scraping)",
         ));
     }
     if config.composio.enabled {
@@ -3217,8 +3188,7 @@ pub async fn start_channels(config: Config) -> Result<()> {
         config.skills.prompt_injection_mode,
     );
     if !native_tools {
-        let suffix = build_tool_instructions(tools_registry.as_ref());
-        system_prompt.push_str(&suffix);
+        system_prompt.push_str(&build_tool_instructions(tools_registry.as_ref()));
     }
 
     if !skills.is_empty() {
@@ -3260,16 +3230,14 @@ pub async fn start_channels(config: Config) -> Result<()> {
         effective_backend,
         if config.memory.auto_save { "on" } else { "off" }
     );
-    if !channels.is_empty() {
-        println!(
-            "  📡 Channels: {}",
-            channels
-                .iter()
-                .map(|c| c.name())
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-    }
+    println!(
+        "  📡 Channels: {}",
+        channels
+            .iter()
+            .map(|c| c.name())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     println!();
     println!("  Listening for messages... (Ctrl+C to stop)");
     println!();
@@ -3354,12 +3322,11 @@ pub async fn start_channels(config: Config) -> Result<()> {
             None
         },
         non_cli_excluded_tools: Arc::new(config.autonomy.non_cli_excluded_tools.clone()),
-        global_tool_allowlist: Arc::new(config.tool_allowlist.clone()),
     });
 
     run_message_dispatch_loop(rx, runtime_ctx, max_in_flight_messages).await;
 
-    // Wait for all channel listener tasks.
+    // Wait for all channel tasks
     for h in handles {
         let _ = h.await;
     }
@@ -3568,7 +3535,6 @@ mod tests {
             workspace_dir: Arc::new(std::env::temp_dir()),
             message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
             non_cli_excluded_tools: Arc::new(Vec::new()),
-            global_tool_allowlist: Arc::new(Vec::new()),
         };
 
         assert!(compact_sender_history(&ctx, &sender));
@@ -3618,7 +3584,6 @@ mod tests {
             workspace_dir: Arc::new(std::env::temp_dir()),
             message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
             non_cli_excluded_tools: Arc::new(Vec::new()),
-            global_tool_allowlist: Arc::new(Vec::new()),
         };
 
         append_sender_turn(&ctx, &sender, ChatMessage::user("hello"));
@@ -3671,7 +3636,6 @@ mod tests {
             workspace_dir: Arc::new(std::env::temp_dir()),
             message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
             non_cli_excluded_tools: Arc::new(Vec::new()),
-            global_tool_allowlist: Arc::new(Vec::new()),
         };
 
         assert!(rollback_orphan_user_turn(&ctx, &sender, "pending"));
@@ -4145,7 +4109,6 @@ BTC is currently around $65,000 based on latest tool output."#
             message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
             interrupt_on_new_message: false,
             non_cli_excluded_tools: Arc::new(Vec::new()),
-            global_tool_allowlist: Arc::new(Vec::new()),
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
         });
@@ -4205,7 +4168,6 @@ BTC is currently around $65,000 based on latest tool output."#
             message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
             interrupt_on_new_message: false,
             non_cli_excluded_tools: Arc::new(Vec::new()),
-            global_tool_allowlist: Arc::new(Vec::new()),
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
         });
@@ -4281,7 +4243,6 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
-            global_tool_allowlist: Arc::new(Vec::new()),
         });
 
         process_channel_message(
@@ -4341,7 +4302,6 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
-            global_tool_allowlist: Arc::new(Vec::new()),
         });
 
         process_channel_message(
@@ -4410,7 +4370,6 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
-            global_tool_allowlist: Arc::new(Vec::new()),
         });
 
         process_channel_message(
@@ -4500,7 +4459,6 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
-            global_tool_allowlist: Arc::new(Vec::new()),
         });
 
         process_channel_message(
@@ -4572,7 +4530,6 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
-            global_tool_allowlist: Arc::new(Vec::new()),
         });
 
         process_channel_message(
@@ -4659,7 +4616,6 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
-            global_tool_allowlist: Arc::new(Vec::new()),
         });
 
         process_channel_message(
@@ -4731,7 +4687,6 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
-            global_tool_allowlist: Arc::new(Vec::new()),
         });
 
         process_channel_message(
@@ -4792,7 +4747,6 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
-            global_tool_allowlist: Arc::new(Vec::new()),
         });
 
         process_channel_message(
@@ -4964,7 +4918,6 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
-            global_tool_allowlist: Arc::new(Vec::new()),
         });
 
         let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(4);
@@ -5045,7 +4998,6 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
-            global_tool_allowlist: Arc::new(Vec::new()),
         });
 
         let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(8);
@@ -5138,7 +5090,6 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
-            global_tool_allowlist: Arc::new(Vec::new()),
         });
 
         let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(8);
@@ -5213,7 +5164,6 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
-            global_tool_allowlist: Arc::new(Vec::new()),
         });
 
         process_channel_message(
@@ -5273,7 +5223,6 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
-            global_tool_allowlist: Arc::new(Vec::new()),
         });
 
         process_channel_message(
@@ -5790,7 +5739,6 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
-            global_tool_allowlist: Arc::new(Vec::new()),
         });
 
         process_channel_message(
@@ -5876,7 +5824,6 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
-            global_tool_allowlist: Arc::new(Vec::new()),
         });
 
         process_channel_message(
@@ -5962,7 +5909,6 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
-            global_tool_allowlist: Arc::new(Vec::new()),
         });
 
         process_channel_message(
@@ -6512,7 +6458,6 @@ This is an example JSON object for profile settings."#;
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
-            global_tool_allowlist: Arc::new(Vec::new()),
         });
 
         // Simulate a photo attachment message with [IMAGE:] marker.
@@ -6579,7 +6524,6 @@ This is an example JSON object for profile settings."#;
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
-            global_tool_allowlist: Arc::new(Vec::new()),
         });
 
         process_channel_message(
@@ -6641,58 +6585,6 @@ This is an example JSON object for profile settings."#;
         assert!(
             turns.iter().all(|turn| !turn.content.contains("[IMAGE:")),
             "failed vision turn must not persist image marker content"
-        );
-    }
-
-    // ── C-3: user_facing_llm_error ───────────────────────────────
-
-    #[test]
-    fn user_facing_llm_error_ollama_not_running() {
-        let err = anyhow::anyhow!("connection refused: Is Ollama running? Try: ollama serve");
-        let msg = user_facing_llm_error(&err);
-        assert!(
-            msg.contains("can't reach the reasoning engine"),
-            "should hint at Ollama being down: {msg}"
-        );
-    }
-
-    #[test]
-    fn user_facing_llm_error_ollama_serve_phrase() {
-        let err = anyhow::anyhow!("failed to connect: ollama serve is not running");
-        let msg = user_facing_llm_error(&err);
-        assert!(
-            msg.contains("can't reach the reasoning engine"),
-            "ollama serve phrase should match: {msg}"
-        );
-    }
-
-    #[test]
-    fn user_facing_llm_error_model_not_found() {
-        let err = anyhow::anyhow!("model 'qwen3:14b' not found, try pulling it first");
-        let msg = user_facing_llm_error(&err);
-        assert!(
-            msg.contains("AI model isn't loaded yet"),
-            "should hint to pull the model: {msg}"
-        );
-    }
-
-    #[test]
-    fn user_facing_llm_error_pull_it_first_phrase() {
-        let err = anyhow::anyhow!("you must pull it first before using");
-        let msg = user_facing_llm_error(&err);
-        assert!(
-            msg.contains("AI model isn't loaded yet"),
-            "pull it first phrase should match: {msg}"
-        );
-    }
-
-    #[test]
-    fn user_facing_llm_error_generic_fallback() {
-        let err = anyhow::anyhow!("unexpected provider timeout");
-        let msg = user_facing_llm_error(&err);
-        assert!(
-            msg.starts_with("⚠️ Error:"),
-            "generic error should use fallback format: {msg}"
         );
     }
 }
