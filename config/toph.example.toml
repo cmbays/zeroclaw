@@ -25,6 +25,7 @@ bot_token = "REPLACE_WITH_MM_TOKEN_TOPH"
 allowed_users = ["*"]
 thread_replies = true
 mention_only = true
+# thread_ttl_minutes = 30  # minutes of inactivity before thread continuation expires (default 30)
 
 [team]
 # All 6 bots listed in every config (including self) — intentional: simplifies identical team blocks.

@@ -2734,6 +2734,7 @@ fn collect_configured_channels(
                 mm.allowed_users.clone(),
                 mm.thread_replies.unwrap_or(true),
                 mm.mention_only.unwrap_or(false),
+                mm.thread_ttl_minutes.unwrap_or(30),
             )),
         });
     }
@@ -6223,6 +6224,7 @@ This is an example JSON object for profile settings."#;
             allowed_users: vec![],
             thread_replies: Some(true),
             mention_only: Some(false),
+            thread_ttl_minutes: None,
         });
 
         let channels = collect_configured_channels(&config, "test");

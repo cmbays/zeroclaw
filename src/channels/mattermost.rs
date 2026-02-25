@@ -2,7 +2,9 @@ use super::traits::{Channel, ChannelMessage, SendMessage};
 use anyhow::{bail, Result};
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
+use std::collections::HashMap;
+use std::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
 
 /// Maximum consecutive WebSocket reconnect attempts before falling back to polling.
@@ -11,6 +13,51 @@ const WS_MAX_RECONNECT: u32 = 10;
 const WS_BASE_BACKOFF_SECS: u64 = 1;
 /// Maximum backoff delay (seconds) for WebSocket reconnection.
 const WS_MAX_BACKOFF_SECS: u64 = 60;
+
+/// In-memory state tracking which threads are "active" for continuation without @mention.
+/// A thread becomes active when the bot receives a valid mention within it; the TTL
+/// clock starts from that moment (not from when the bot finishes responding).
+/// Entries are lazily evicted on the next `touch()` after they expire.
+///
+/// Note: `is_active` and `touch` are separate lock acquisitions. A thread whose TTL
+/// expires in the window between the two calls may receive one extra message pass-through.
+/// This is acceptable given the 30-minute default TTL.
+struct ThreadActivityState {
+    ttl: std::time::Duration,
+    active: RwLock<HashMap<String, Instant>>,
+}
+
+impl ThreadActivityState {
+    fn new(ttl_minutes: u32) -> Self {
+        if ttl_minutes == 0 {
+            tracing::warn!(
+                "Mattermost thread_ttl_minutes is 0 — \
+                 thread continuation is effectively disabled. \
+                 Set thread_ttl_minutes to a positive value (e.g. 30) to enable it."
+            );
+        }
+        Self {
+            ttl: std::time::Duration::from_secs(u64::from(ttl_minutes) * 60),
+            active: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Returns true if the thread was touched within the TTL window.
+    fn is_active(&self, thread_id: &str) -> bool {
+        self.active
+            .read()
+            .get(thread_id)
+            .is_some_and(|t| t.elapsed() < self.ttl)
+    }
+
+    /// Record or refresh activity for a thread, and lazily evict expired entries.
+    fn touch(&self, thread_id: &str) {
+        let mut guard = self.active.write();
+        guard.insert(thread_id.to_string(), Instant::now());
+        let ttl = self.ttl;
+        guard.retain(|_, t| t.elapsed() < ttl);
+    }
+}
 
 /// Mattermost channel — connects via WebSocket for real-time message delivery with polling fallback.
 /// Sends via REST API v4 POST /api/v4/posts (unchanged from polling implementation).
@@ -24,6 +71,8 @@ pub struct MattermostChannel {
     thread_replies: bool,
     /// When true, only respond to messages that @-mention the bot.
     mention_only: bool,
+    /// Active thread state for thread continuation (relevant when mention_only=true).
+    thread_state: ThreadActivityState,
     /// Handle for the background typing-indicator loop (aborted on stop_typing).
     typing_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
@@ -36,6 +85,7 @@ impl MattermostChannel {
         allowed_users: Vec<String>,
         thread_replies: bool,
         mention_only: bool,
+        thread_ttl_minutes: u32,
     ) -> Self {
         // Ensure base_url doesn't have a trailing slash for consistent path joining
         let base_url = base_url.trim_end_matches('/').to_string();
@@ -46,6 +96,7 @@ impl MattermostChannel {
             allowed_users,
             thread_replies,
             mention_only,
+            thread_state: ThreadActivityState::new(thread_ttl_minutes),
             typing_handle: Mutex::new(None),
         }
     }
@@ -519,10 +570,35 @@ impl MattermostChannel {
             return None;
         }
 
-        // mention_only filtering: skip messages that don't @-mention the bot.
+        // mention_only filtering: skip messages that don't @-mention the bot,
+        // unless they arrive in a thread the bot recently activated (thread continuation).
+        //
+        // Side effect: thread_state.touch() is called to activate or refresh the thread
+        // TTL, but only after content is confirmed non-empty (touch fires after the ?
+        // operator on normalize so bare "@bot" messages don't spuriously activate threads).
         let content = if self.mention_only {
-            let normalized = normalize_mattermost_content(text, bot_user_id, bot_username, post);
-            normalized?
+            // Thread is identified by its root post ID.
+            // Top-level posts (root_id empty) use their own id — they become thread roots on reply.
+            let thread_id = if root_id.is_empty() { id } else { root_id };
+            let has_mention = contains_bot_mention_mm(text, bot_user_id, bot_username, post);
+            let in_active_thread = !thread_id.is_empty() && self.thread_state.is_active(thread_id);
+
+            if has_mention {
+                // Confirm content is non-empty before activating the thread.
+                // This ensures a bare "@bot" message (no content after stripping) does not
+                // activate thread continuation for a conversation the bot never received.
+                let content = normalize_mattermost_content(text, bot_user_id, bot_username, post)?;
+                if !thread_id.is_empty() {
+                    self.thread_state.touch(thread_id);
+                }
+                content
+            } else if in_active_thread {
+                // Thread continuation — refresh TTL and pass message through unmodified.
+                self.thread_state.touch(thread_id);
+                text.to_string()
+            } else {
+                return None;
+            }
         } else {
             text.to_string()
         };
@@ -688,10 +764,11 @@ mod tests {
             allowed,
             thread_replies,
             false,
+            30,
         )
     }
 
-    // Helper: create a channel with mention_only=true.
+    // Helper: create a channel with mention_only=true and default TTL.
     fn make_mention_only_channel() -> MattermostChannel {
         MattermostChannel::new(
             "url".into(),
@@ -700,6 +777,7 @@ mod tests {
             vec!["*".into()],
             true,
             true,
+            30,
         )
     }
 
@@ -712,6 +790,7 @@ mod tests {
             vec![],
             false,
             false,
+            30,
         );
         assert_eq!(ch.base_url, "https://mm.example.com");
     }
@@ -1153,6 +1232,7 @@ mod tests {
             vec![],
             false,
             false,
+            30,
         );
         assert_eq!(ch.websocket_url(), "wss://mm.example.com/api/v4/websocket");
     }
@@ -1166,6 +1246,7 @@ mod tests {
             vec![],
             false,
             false,
+            30,
         );
         assert_eq!(ch.websocket_url(), "ws://localhost:8065/api/v4/websocket");
     }
@@ -1179,6 +1260,7 @@ mod tests {
             vec![],
             false,
             false,
+            30,
         );
         // Trailing slash stripped in new(), so conversion is clean
         assert_eq!(ch.websocket_url(), "wss://mm.example.com/api/v4/websocket");
@@ -1243,6 +1325,7 @@ mod tests {
             vec!["*".into()],
             false,
             false,
+            30,
         );
         let post_json = r#"{"id":"post1","user_id":"user1","message":"hello","create_at":1600000000001,"root_id":""}"#;
 
@@ -1344,7 +1427,8 @@ mod tests {
     #[test]
     fn parse_ws_posted_event_unauthorized_user_returns_none() {
         // Allowlist is empty — all users denied.
-        let ch = MattermostChannel::new("url".into(), "token".into(), None, vec![], false, false);
+        let ch =
+            MattermostChannel::new("url".into(), "token".into(), None, vec![], false, false, 30);
         let post_json = r#"{"id":"post1","user_id":"user1","message":"hello","create_at":1600000000001,"root_id":""}"#;
         let event = make_ws_event("chan1", post_json);
         assert!(ch
@@ -1376,7 +1460,229 @@ mod tests {
             vec![],
             false,
             false,
+            30,
         );
         assert_eq!(ch.websocket_url(), "wss://mm.example.com/api/v4/websocket");
+    }
+
+    // ── thread continuation tests ─────────────────────────────────
+
+    #[test]
+    fn thread_continuation_activates_on_mention_and_allows_followup() {
+        // With mention_only=true: first message must @mention, then replies continue without it.
+        let ch = make_mention_only_channel();
+
+        // First message: @mention activates the thread.
+        let first_post = json!({
+            "id": "root_post",
+            "user_id": "user1",
+            "message": "@mybot start something",
+            "create_at": 1_600_000_000_001_i64,
+            "root_id": ""
+        });
+        let msg = ch
+            .parse_mattermost_post(&first_post, "bot123", "mybot", 0, "chan1")
+            .unwrap();
+        assert_eq!(msg.content, "start something");
+        assert_eq!(msg.reply_target, "chan1:root_post");
+
+        // Follow-up: reply in the same thread without @mention — should pass through.
+        let followup = json!({
+            "id": "reply_post",
+            "user_id": "user1",
+            "message": "and then do this too",
+            "create_at": 1_600_000_000_002_i64,
+            "root_id": "root_post"
+        });
+        let msg = ch
+            .parse_mattermost_post(&followup, "bot123", "mybot", 0, "chan1")
+            .unwrap();
+        assert_eq!(msg.content, "and then do this too");
+        assert_eq!(msg.reply_target, "chan1:root_post");
+    }
+
+    #[test]
+    fn thread_continuation_unrelated_channel_not_activated() {
+        // A reply in a different thread (different root_id) is not active.
+        let ch = make_mention_only_channel();
+
+        // Activate thread "root_a".
+        let first = json!({
+            "id": "root_a",
+            "user_id": "user1",
+            "message": "@mybot hello",
+            "create_at": 1_600_000_000_001_i64,
+            "root_id": ""
+        });
+        assert!(ch
+            .parse_mattermost_post(&first, "bot123", "mybot", 0, "chan1")
+            .is_some());
+
+        // Reply in a different thread (root_b) without @mention — should be filtered.
+        let other_thread = json!({
+            "id": "reply_b",
+            "user_id": "user1",
+            "message": "what is up",
+            "create_at": 1_600_000_000_002_i64,
+            "root_id": "root_b"
+        });
+        assert!(ch
+            .parse_mattermost_post(&other_thread, "bot123", "mybot", 0, "chan1")
+            .is_none());
+    }
+
+    #[test]
+    fn thread_state_is_active_returns_false_when_empty() {
+        let state = ThreadActivityState::new(30);
+        assert!(!state.is_active("no_such_thread"));
+    }
+
+    #[test]
+    fn thread_state_touch_and_is_active() {
+        let state = ThreadActivityState::new(30);
+        state.touch("thread_xyz");
+        assert!(state.is_active("thread_xyz"));
+        assert!(!state.is_active("other_thread"));
+    }
+
+    #[test]
+    fn thread_ttl_zero_expires_immediately() {
+        // TTL of 0 means threads expire immediately after being touched.
+        let state = ThreadActivityState::new(0);
+        state.touch("thread_xyz");
+        // elapsed() will already be >= 0s == ttl, so is_active should be false.
+        assert!(!state.is_active("thread_xyz"));
+    }
+
+    #[test]
+    fn thread_continuation_self_message_in_active_thread_returns_none() {
+        // Even in an active thread, the bot must not process its own messages.
+        let ch = make_mention_only_channel();
+
+        // Activate the thread via mention.
+        let activate = json!({
+            "id": "root_post",
+            "user_id": "user1",
+            "message": "@mybot start",
+            "create_at": 1_600_000_000_001_i64,
+            "root_id": ""
+        });
+        assert!(ch
+            .parse_mattermost_post(&activate, "bot123", "mybot", 0, "chan1")
+            .is_some());
+
+        // Bot sends a follow-up — must be filtered even though thread is active.
+        let self_reply = json!({
+            "id": "bot_reply",
+            "user_id": "bot123",
+            "message": "here is my response",
+            "create_at": 1_600_000_000_002_i64,
+            "root_id": "root_post"
+        });
+        assert!(ch
+            .parse_mattermost_post(&self_reply, "bot123", "mybot", 0, "chan1")
+            .is_none());
+    }
+
+    #[test]
+    fn thread_continuation_unauthorized_user_in_active_thread_returns_none() {
+        // Thread continuation must not bypass the allowlist.
+        let ch = MattermostChannel::new(
+            "url".into(),
+            "token".into(),
+            None,
+            vec!["authorized_user".into()],
+            true,
+            true,
+            30,
+        );
+
+        // Authorized user activates the thread.
+        let activate = json!({
+            "id": "root_post",
+            "user_id": "authorized_user",
+            "message": "@mybot start",
+            "create_at": 1_600_000_000_001_i64,
+            "root_id": ""
+        });
+        assert!(ch
+            .parse_mattermost_post(&activate, "bot123", "mybot", 0, "chan1")
+            .is_some());
+
+        // Unauthorized user sends a follow-up in the same thread — must be denied.
+        let followup = json!({
+            "id": "reply_post",
+            "user_id": "intruder",
+            "message": "what can you do?",
+            "create_at": 1_600_000_000_002_i64,
+            "root_id": "root_post"
+        });
+        assert!(ch
+            .parse_mattermost_post(&followup, "bot123", "mybot", 0, "chan1")
+            .is_none());
+    }
+
+    #[test]
+    fn thread_continuation_second_mention_strips_mention_not_raw() {
+        // A second @mention in an already-active thread strips the mention (has_mention branch),
+        // rather than passing text through raw (in_active_thread branch).
+        let ch = make_mention_only_channel();
+
+        // First @mention activates the thread.
+        let first = json!({
+            "id": "root_post",
+            "user_id": "user1",
+            "message": "@mybot start",
+            "create_at": 1_600_000_000_001_i64,
+            "root_id": ""
+        });
+        assert!(ch
+            .parse_mattermost_post(&first, "bot123", "mybot", 0, "chan1")
+            .is_some());
+
+        // Second @mention in the thread — must still strip the mention.
+        let second = json!({
+            "id": "reply_post",
+            "user_id": "user1",
+            "message": "@mybot do more",
+            "create_at": 1_600_000_000_002_i64,
+            "root_id": "root_post"
+        });
+        let msg = ch
+            .parse_mattermost_post(&second, "bot123", "mybot", 0, "chan1")
+            .unwrap();
+        assert_eq!(msg.content, "do more"); // mention stripped, not passed raw
+    }
+
+    #[test]
+    fn thread_continuation_bare_mention_in_active_thread_returns_none() {
+        // A bare "@mybot" (empty after stripping) in an active thread must return None.
+        // Crucially, the thread TTL must NOT be refreshed for this empty message
+        // because the bot never receives it.
+        let ch = make_mention_only_channel();
+
+        // Activate the thread.
+        let activate = json!({
+            "id": "root_post",
+            "user_id": "user1",
+            "message": "@mybot start",
+            "create_at": 1_600_000_000_001_i64,
+            "root_id": ""
+        });
+        assert!(ch
+            .parse_mattermost_post(&activate, "bot123", "mybot", 0, "chan1")
+            .is_some());
+
+        // Bare "@mybot" with no content in the active thread — must drop to None.
+        let bare = json!({
+            "id": "bare_post",
+            "user_id": "user1",
+            "message": "@mybot",
+            "create_at": 1_600_000_000_002_i64,
+            "root_id": "root_post"
+        });
+        assert!(ch
+            .parse_mattermost_post(&bare, "bot123", "mybot", 0, "chan1")
+            .is_none());
     }
 }

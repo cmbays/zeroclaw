@@ -2910,6 +2910,10 @@ pub struct MattermostConfig {
     /// Other messages in the channel are silently ignored.
     #[serde(default)]
     pub mention_only: Option<bool>,
+    /// Minutes of inactivity before a thread is no longer considered active for continuation.
+    /// Only relevant when `mention_only = true`. Default: 30.
+    #[serde(default)]
+    pub thread_ttl_minutes: Option<u32>,
 }
 
 impl ChannelConfig for MattermostConfig {

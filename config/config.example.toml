@@ -53,6 +53,7 @@ bot_token     = "REPLACE_WITH_BOT_TOKEN"
 allowed_users = ["*"]
 thread_replies = true
 mention_only   = true
+# thread_ttl_minutes = 30  # minutes of inactivity before thread continuation expires (default 30)
 
 # ── Linear ──────────────────────────────────────────────────────────────────────
 
