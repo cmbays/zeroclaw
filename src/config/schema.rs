@@ -2914,6 +2914,10 @@ pub struct MattermostConfig {
     /// Only relevant when `mention_only = true`. Default: 30.
     #[serde(default)]
     pub thread_ttl_minutes: Option<u32>,
+    /// Sync bot display name, description, and avatar from the identity file at startup.
+    /// Default: true. Set to false to disable.
+    #[serde(default)]
+    pub sync_profile: Option<bool>,
 }
 
 impl ChannelConfig for MattermostConfig {
