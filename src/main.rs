@@ -577,10 +577,27 @@ enum ModelCommands {
         #[arg(long)]
         provider: Option<String>,
 
+        /// Refresh all providers that support live model discovery
+        #[arg(long)]
+        all: bool,
+
         /// Force live refresh and ignore fresh cache
         #[arg(long)]
         force: bool,
     },
+    /// List cached models for a provider
+    List {
+        /// Provider name (defaults to configured default provider)
+        #[arg(long)]
+        provider: Option<String>,
+    },
+    /// Set the default model in config
+    Set {
+        /// Model name to set as default
+        model: String,
+    },
+    /// Show current model configuration and cache status
+    Status,
 }
 
 #[derive(Subcommand, Debug)]
@@ -712,9 +729,9 @@ async fn main() -> Result<()> {
             bail!("--channels-only does not accept --force");
         }
         let config = if channels_only {
-            onboard::run_channels_repair_wizard().await
+            Box::pin(onboard::run_channels_repair_wizard()).await
         } else if interactive {
-            onboard::run_wizard(force).await
+            Box::pin(onboard::run_wizard(force)).await
         } else {
             onboard::run_quick_setup(
                 api_key.as_deref(),
@@ -897,9 +914,25 @@ async fn main() -> Result<()> {
         Commands::Cron { cron_command } => cron::handle_command(cron_command, &config),
 
         Commands::Models { model_command } => match model_command {
-            ModelCommands::Refresh { provider, force } => {
-                onboard::run_models_refresh(&config, provider.as_deref(), force).await
+            ModelCommands::Refresh {
+                provider,
+                all,
+                force,
+            } => {
+                if all {
+                    if provider.is_some() {
+                        bail!("`models refresh --all` cannot be combined with --provider");
+                    }
+                    onboard::run_models_refresh_all(&config, force).await
+                } else {
+                    onboard::run_models_refresh(&config, provider.as_deref(), force).await
+                }
             }
+            ModelCommands::List { provider } => {
+                onboard::run_models_list(&config, provider.as_deref()).await
+            }
+            ModelCommands::Set { model } => onboard::run_models_set(&config, &model).await,
+            ModelCommands::Status => onboard::run_models_status(&config).await,
         },
 
         Commands::Providers => {
