@@ -433,7 +433,7 @@ async fn create_incoming_webhook(
         .bearer_auth(token)
         .json(&json!({
             "channel_id": channel_id,
-            "display_name": format!("{channel_name} alerts"),
+            "display_name": format!("#{channel_name}"),
             "description": format!("Incoming webhook for #{channel_name}"),
         }))
         .send()
@@ -446,12 +446,13 @@ async fn create_incoming_webhook(
         warn!("could not create webhook for #{channel_name}: {status} — {msg}");
         return Ok(());
     }
-    let hook_token = body
-        .get("token")
+    // Mattermost webhook URLs use the hook's `id` as the path component.
+    let hook_id = body
+        .get("id")
         .and_then(|v| v.as_str())
         .unwrap_or("(unknown)");
-    // The hook URL contains a secret token — store it securely, do not commit or share.
-    println!("    webhook #{channel_name} [SECRET URL]: {base_url}/hooks/{hook_token}");
+    // The hook URL grants write access to the channel — store it securely, do not commit.
+    println!("    webhook #{channel_name} [SECRET URL]: {base_url}/hooks/{hook_id}");
     Ok(())
 }
 
