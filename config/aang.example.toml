@@ -10,7 +10,7 @@ tool_allowlist = ["delegate", "memory_store", "memory_recall", "ask_user"]
 
 [identity]
 format = "aieos"
-aieos_path = "modes/aang/identity.json"
+aieos_path = "identities/aang/identity.json"
 
 [memory]
 backend = "sqlite"

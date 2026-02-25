@@ -12,7 +12,7 @@ tool_allowlist = ["shell", "file_read", "file_write", "file_edit", "glob", "cont
 
 [identity]
 format = "aieos"
-aieos_path = "modes/sokka/identity.json"
+aieos_path = "identities/sokka/identity.json"
 
 [memory]
 backend = "sqlite"

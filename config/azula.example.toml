@@ -10,7 +10,7 @@ tool_allowlist = ["content_search", "file_read", "glob", "ask_user"]
 
 [identity]
 format = "aieos"
-aieos_path = "modes/azula/identity.json"
+aieos_path = "identities/azula/identity.json"
 
 [memory]
 backend = "sqlite"

@@ -10,7 +10,7 @@ tool_allowlist = ["memory_store", "memory_recall", "ask_user"]
 
 [identity]
 format = "aieos"
-aieos_path = "modes/iroh/identity.json"
+aieos_path = "identities/iroh/identity.json"
 
 [memory]
 backend = "sqlite"

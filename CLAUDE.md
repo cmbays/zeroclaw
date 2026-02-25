@@ -33,15 +33,12 @@ git checkout dev && git merge main
 
 | File | Purpose | ~LOC |
 |------|---------|------|
-| `src/modes/mod.rs` | ModeRegistry, ModeConfig | 60 |
-| `src/modes/thread_state.rs` | ThreadModeState, per-thread Agent store | 40 |
-| `src/modes/response_policy.rs` | ResponsePolicySection (PromptSection impl) | 20 |
+| `src/channels/mattermost.rs` | MattermostChannel (WebSocket + polling) | ~1700 |
 | `src/tools/linear.rs` | LinearTool (Tool trait impl, GraphQL) | 400 |
 | `src/wake_sleep.rs` | WakeSleepEngine, timers | 150 |
 | `src/tools/slack_ops.rs` | Channel lifecycle operations | 80 |
 | `src/webhook.rs` | HTTP webhook endpoint | 70 |
-| `modes/pm/identity.json` | PM persona (AIEOS format) | 50 |
-| `modes/pm/skills/` | PM skill manifests | 30 |
+| `identities/{bot}/identity.json` | ATLA bot persona (AIEOS v1.1 format) | — |
 
 ### Modified ZeroClaw Files
 
@@ -50,7 +47,7 @@ git checkout dev && git merge main
 | `Cargo.toml` | Feature flags (additive) | Low |
 | `src/channels/slack.rs` | Socket Mode rewrite, BK handlers | Medium |
 | `src/channels/traits.rs` | Add fields to SendMessage | Low |
-| `src/config/schema.rs` | Add `[modes]` section | Low |
+| `src/config/schema.rs` | Add `[channels_config.mattermost]` section | Low |
 | `src/tools/mod.rs` | Register LinearTool | Low |
 | `src/main.rs` | Startup wiring | Low |
 

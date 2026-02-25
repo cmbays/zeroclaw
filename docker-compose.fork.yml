@@ -26,7 +26,7 @@ x-zeroclaw-bot: &zeroclaw-bot
   networks:
     - fork-net
   volumes:
-    - ./modes:/zeroclaw-data/workspace/modes:ro
+    - ./identities:/zeroclaw-data/workspace/identities:ro
   healthcheck:
     test: ["CMD", "curl", "-f", "http://localhost:42617/health"]
     interval: 30s
@@ -50,7 +50,7 @@ services:
     container_name: zeroclaw-sokka
     volumes:
       - ./config/sokka.toml:/zeroclaw-data/.zeroclaw/config.toml:ro
-      - ./modes:/zeroclaw-data/workspace/modes:ro
+      - ./identities:/zeroclaw-data/workspace/identities:ro
       - sokka-workspace:/zeroclaw-data/workspace
 
   # ── Katara (PM Bot) ─────────────────────────────────────────────
@@ -59,7 +59,7 @@ services:
     container_name: zeroclaw-katara
     volumes:
       - ./config/katara.toml:/zeroclaw-data/.zeroclaw/config.toml:ro
-      - ./modes:/zeroclaw-data/workspace/modes:ro
+      - ./identities:/zeroclaw-data/workspace/identities:ro
       - katara-workspace:/zeroclaw-data/workspace
 
   # ── Toph (DevOps Bot) ───────────────────────────────────────────
@@ -68,7 +68,7 @@ services:
     container_name: zeroclaw-toph
     volumes:
       - ./config/toph.toml:/zeroclaw-data/.zeroclaw/config.toml:ro
-      - ./modes:/zeroclaw-data/workspace/modes:ro
+      - ./identities:/zeroclaw-data/workspace/identities:ro
       - toph-workspace:/zeroclaw-data/workspace
 
   # ── Azula (Security Bot) ────────────────────────────────────────
@@ -77,7 +77,7 @@ services:
     container_name: zeroclaw-azula
     volumes:
       - ./config/azula.toml:/zeroclaw-data/.zeroclaw/config.toml:ro
-      - ./modes:/zeroclaw-data/workspace/modes:ro
+      - ./identities:/zeroclaw-data/workspace/identities:ro
       - azula-workspace:/zeroclaw-data/workspace
 
   # ── Iroh (Creative Bot) ─────────────────────────────────────────
@@ -86,7 +86,7 @@ services:
     container_name: zeroclaw-iroh
     volumes:
       - ./config/iroh.toml:/zeroclaw-data/.zeroclaw/config.toml:ro
-      - ./modes:/zeroclaw-data/workspace/modes:ro
+      - ./identities:/zeroclaw-data/workspace/identities:ro
       - iroh-workspace:/zeroclaw-data/workspace
 
   # ── Aang (Coordinator Bot) ──────────────────────────────────────
@@ -95,7 +95,7 @@ services:
     container_name: zeroclaw-aang
     volumes:
       - ./config/aang.toml:/zeroclaw-data/.zeroclaw/config.toml:ro
-      - ./modes:/zeroclaw-data/workspace/modes:ro
+      - ./identities:/zeroclaw-data/workspace/identities:ro
       - aang-workspace:/zeroclaw-data/workspace
 
 networks:
