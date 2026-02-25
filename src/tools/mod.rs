@@ -53,7 +53,6 @@ pub mod schedule;
 pub mod schema;
 pub mod screenshot;
 pub mod shell;
-pub mod slack_ops;
 pub mod traits;
 pub mod web_fetch;
 pub mod web_search_tool;

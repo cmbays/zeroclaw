@@ -82,8 +82,6 @@ mod skills;
 mod tools;
 mod tunnel;
 mod util;
-mod wake_sleep;
-mod webhook;
 
 use config::Config;
 
