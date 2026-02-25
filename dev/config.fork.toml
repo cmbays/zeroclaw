@@ -1,0 +1,17 @@
+# ZeroClaw Fork — Config Template
+#
+# Used with docker-compose.fork.yml
+# Ollama URL points to the container service name (not host.docker.internal)
+
+workspace_dir = "/zeroclaw-data/workspace"
+config_path = "/zeroclaw-data/.zeroclaw/config.toml"
+# Ollama base URL via Docker service name
+api_key = "http://ollama:11434"
+default_provider = "ollama"
+default_model = "qwen3:14b"
+default_temperature = 0.7
+
+[gateway]
+port = 42617
+host = "[::]"
+allow_public_bind = true

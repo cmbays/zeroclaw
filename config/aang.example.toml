@@ -1,0 +1,62 @@
+# ZeroClaw — Aang (Coordinator Bot) config
+# Usage: zeroclaw start --config config/aang.toml
+
+default_provider = "ollama"
+default_model = "qwen3:14b"
+api_key = "http://localhost:11434"
+default_temperature = 0.5
+
+tool_allowlist = ["delegate", "memory_store", "memory_recall", "ask_user"]
+
+[identity]
+format = "aieos"
+aieos_path = "identities/aang/identity.json"
+
+[memory]
+backend = "sqlite"
+sqlite_path = "~/.zeroclaw/aang.db"
+
+[channels_config]
+cli = false
+
+[channels_config.mattermost]
+url = "http://localhost:8065"
+bot_token = "REPLACE_WITH_MM_TOKEN_AANG"
+allowed_users = ["*"]
+thread_replies = true
+mention_only = true
+# thread_ttl_minutes = 30  # minutes of inactivity before thread continuation expires (default 30)
+
+[team]
+# All 6 bots listed in every config (including self) — intentional: simplifies identical team blocks.
+# human_username = "your_mattermost_username"  # Optional: @mention this user when human input is needed
+
+[[team.bots]]
+username = "sokka"
+role = "Dev"
+description = "Code generation, debugging, file operations, shell commands"
+
+[[team.bots]]
+username = "katara"
+role = "PM"
+description = "Linear issues, project status, backlog grooming, standups"
+
+[[team.bots]]
+username = "toph"
+role = "DevOps"
+description = "Deployments, CI/CD, Docker, infrastructure, monitoring"
+
+[[team.bots]]
+username = "azula"
+role = "Security"
+description = "Code review, vulnerability scanning, security audit"
+
+[[team.bots]]
+username = "iroh"
+role = "Creative"
+description = "Brainstorming, architecture ideation, team memory, lateral thinking"
+
+[[team.bots]]
+username = "aang"
+role = "Coordinator"
+description = "Routes work, big picture, cross-team coordination"

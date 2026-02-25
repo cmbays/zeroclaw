@@ -370,7 +370,8 @@ fn pick_uniform_index(len: usize) -> usize {
     loop {
         let value = rand::random::<u64>();
         if value < reject_threshold {
-            return (value % upper) as usize;
+            return usize::try_from(value % upper)
+                .expect("value % upper <= len which fits in usize");
         }
     }
 }
@@ -389,9 +390,10 @@ fn encode_emoji_for_discord(emoji: &str) -> String {
         return emoji.to_string();
     }
 
+    use std::fmt::Write as _;
     let mut encoded = String::new();
     for byte in emoji.as_bytes() {
-        encoded.push_str(&format!("%{byte:02X}"));
+        write!(encoded, "%{byte:02X}").expect("write to String is infallible");
     }
     encoded
 }
@@ -1368,7 +1370,11 @@ mod tests {
     #[test]
     fn split_message_many_short_lines() {
         // Many short lines should be batched into chunks under the limit
-        let msg: String = (0..500).map(|i| format!("line {i}\n")).collect();
+        let msg: String = (0..500_u32).fold(String::new(), |mut s, i| {
+            use std::fmt::Write as _;
+            writeln!(s, "line {i}").expect("write to String is infallible");
+            s
+        });
         let parts = split_message_for_discord(&msg);
         for part in &parts {
             assert!(

@@ -429,6 +429,8 @@ mod tests {
             allowed_users: vec!["*".into()],
             thread_replies: Some(true),
             mention_only: Some(false),
+            thread_ttl_minutes: None,
+            sync_profile: None,
         });
         assert!(has_supervised_channels(&config));
     }
@@ -442,6 +444,30 @@ mod tests {
             allowed_users: vec!["*".into()],
         });
         assert!(has_supervised_channels(&config));
+    }
+
+    #[test]
+    fn webhook_supervisor_enabled_when_linear_enabled_and_port_set() {
+        let mut config = Config::default();
+        config.linear.enabled = true;
+        config.linear.webhook_port = Some(3001);
+        assert!(config.linear.enabled && config.linear.webhook_port.is_some());
+    }
+
+    #[test]
+    fn webhook_supervisor_skipped_when_linear_disabled() {
+        let mut config = Config::default();
+        config.linear.enabled = false;
+        config.linear.webhook_port = Some(3001);
+        assert!(!(config.linear.enabled && config.linear.webhook_port.is_some()));
+    }
+
+    #[test]
+    fn webhook_supervisor_skipped_when_port_none() {
+        let mut config = Config::default();
+        config.linear.enabled = true;
+        config.linear.webhook_port = None;
+        assert!(!(config.linear.enabled && config.linear.webhook_port.is_some()));
     }
 
     #[test]

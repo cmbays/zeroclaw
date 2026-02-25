@@ -1,0 +1,449 @@
+# NanoClaw Execution Manifest
+# Pipeline: 20260221-nanoclaw-hub
+# Date: 2026-02-22
+#
+# NOTE: This manifest follows print-4ink's pipeline format but NanoClaw is a
+# separate repo. The `work build` orchestrator won't work directly — sessions
+# run manually in ~/Github/zeroclaw. Retained as machine-readable documentation.
+
+vertical: zeroclaw
+repo: cmbays/zeroclaw
+forked_from: zeroclaw-labs/zeroclaw
+branch_strategy: main=upstream-mirror, dev=integration, feat/*=feature-branches
+
+waves:
+  - name: 'Wave 0: Phase Zero'
+    serial: true
+    repo_context: print-4ink  # starts here, creates zeroclaw fork
+    sessions:
+      - topic: phase-zero
+        stage: build
+        prompt: |
+          # Wave 0: Phase Zero — NanoClaw Repo Setup
+
+          You are setting up the NanoClaw repository by forking ZeroClaw. This is
+          infrastructure-only — no feature code.
+
+          ## What NanoClaw Is
+
+          A conversational PM bot in Slack that drives Linear work management.
+          Built as a fork of ZeroClaw (394k LOC Rust platform, 16.5k stars).
+          Shape A: ~1,100 LOC of new code on top of ZeroClaw's production agent
+          infrastructure. Local LLM via Ollama (Qwen 3 14B). Docker Compose deployment.
+
+          ## Tasks
+
+          Execute these in order:
+
+          ### 0.1 Fork ZeroClaw
+          - `gh repo fork zeroclaw-labs/zeroclaw --clone=false`
+          - Clone: `git clone git@github.com:cmbays/zeroclaw.git ~/Github/zeroclaw`
+          - Add upstream: `git -C ~/Github/zeroclaw remote add upstream https://github.com/zeroclaw-labs/zeroclaw.git`
+          - Create dev branch: `git -C ~/Github/zeroclaw checkout -b dev`
+          - Verify: `cargo build` and `cargo test` pass
+
+          ### 0.2 Strip Unused Cargo Features
+          - Read `Cargo.toml` feature flags
+          - Keep: channel-slack, provider-ollama, identity, tool infrastructure
+          - Strip: Discord, Telegram, Matrix, Lark, WhatsApp, hardware, firmware, web UI, RAG-PDF
+          - Verify: `cargo build` still works, `cargo test` passes for kept features
+
+          ### 0.3 Copy Planning Artifacts
+          - Create `docs/planning/` in zeroclaw repo
+          - Copy 7 files from `~/Github/print-4ink/docs/workspace/20260221-nanoclaw-hub/`:
+            frame.md, shaping.md, breadboard.md, spike-a5-mode-layer.md,
+            spike-zeroclaw-validation.md, requirements-handoff.md, impl-plan.md
+          - Synthesize `docs/planning/DECISIONS.md` from print-4ink memory
+            (`~/.claude/projects/-Users-cmbays-Github-print-4ink/memory/nanoclaw-hub.md`)
+
+          ### 0.4 Create CLAUDE.md
+          - Project overview, commands, architecture, fork rules, code locations
+          - See impl-plan.md Task 0.4 for required sections
+
+          ### 0.5 Create Claude Project Memory
+          - File: `~/.claude/projects/-Users-cmbays-Github-zeroclaw/memory/MEMORY.md`
+          - Seed with key decisions from pipeline (tech stack, shape, critical decisions)
+
+          ### 0.6 Verify Clean Build
+          - `cargo build` with NanoClaw features
+          - `cargo test` passes
+
+          ### 0.7 Docker Compose Skeleton
+          - `docker-compose.yml` with 3 services: zeroclaw (multi-stage Rust build),
+            ollama (ollama/ollama image), tunnel (cloudflare/cloudflared)
+          - `Dockerfile` with multi-stage build
+          - Verify: `docker compose build` succeeds
+
+          ### Commit
+          Create initial commit on `dev` branch with all docs, CLAUDE.md,
+          Cargo.toml changes, and Docker skeleton.
+
+  - name: 'Wave 1: Slack Transport'
+    serial: true
+    repo_context: zeroclaw
+    sessions:
+      - topic: socket-mode-transport
+        stage: build
+        dependsOn: phase-zero
+        prompt: |
+          # Wave 1: Slack Transport (V1 + V2)
+
+          ## Context
+          NanoClaw is a ZeroClaw fork (Rust). You're working in ~/Github/zeroclaw
+          on the `dev` branch.
+
+          Read these first:
+          - `CLAUDE.md` — project overview and rules
+          - `docs/planning/breadboard.md` — V1 and V2 slice tables
+          - `docs/planning/spike-zeroclaw-validation.md` — Slack gaps analysis
+          - `src/channels/slack.rs` — existing HTTP polling implementation
+          - `src/channels/traits.rs` — SendMessage struct
+
+          ## What to Build
+
+          Replace ZeroClaw's HTTP polling Slack integration with Socket Mode WebSocket.
+          Extend send() with identity overrides and Block Kit support.
+
+          **Breadboard affordances:** N1, N2 (stub), N3, N4, N24, N25, S6, U3, U7
+
+          **Modify:**
+          - `src/channels/slack.rs` — rewrite listen() to Socket Mode, extend send()
+          - `src/channels/traits.rs` — add fields to SendMessage
+          - `Cargo.toml` — add tokio-tungstenite
+
+          **Details:**
+          1. Add tokio-tungstenite to Cargo.toml
+          2. Rewrite listen(): call apps.connections.open with app_token, connect
+             via tokio-tungstenite, parse Socket Mode envelopes, acknowledge each,
+             forward events to channel
+          3. Extend SendMessage: username, icon_emoji, reply_broadcast, blocks (all Option)
+          4. Extend send(): include new fields in API payload when present
+          5. Stub filter_event() — pass everything (real logic in Wave 4B)
+          6. Basic route_event() — extract text, channel, thread_ts
+
+          **Test:** Unit tests for envelope parsing, send payload construction.
+          **Demo:** Bot connects via WebSocket, echoes messages with custom identity.
+
+          ## Session Notes
+          Write implementation notes to `docs/sessions/w1-socket-mode-notes.md`.
+
+  - name: 'Wave 2: Mode Layer'
+    serial: true
+    repo_context: zeroclaw
+    sessions:
+      - topic: mode-layer
+        stage: build
+        dependsOn: socket-mode-transport
+        prompt: |
+          # Wave 2: Mode Layer (V3)
+
+          ## Context
+          NanoClaw is a ZeroClaw fork (Rust). Working in ~/Github/zeroclaw on `dev` branch.
+
+          Read these first:
+          - `CLAUDE.md`
+          - `docs/planning/spike-a5-mode-layer.md` — concrete mapping guide
+          - `docs/planning/breadboard.md` — V3 slice table
+          - `src/config/schema.rs` — existing config patterns
+          - `src/agent/agent.rs` — AgentBuilder
+          - `src/identity.rs` — AIEOS v1.1
+          - `src/skills/mod.rs` — Skill loading
+
+          ## What to Build
+
+          Mode layer: ModeRegistry maps mode names to AgentBuilder configs.
+          Per-thread isolation via ThreadModeState. Mode activation parser.
+          Visual identity routing.
+
+          **Breadboard affordances:** N5, N6, N7, N8, N9, S1, S2, U1
+
+          **Create:**
+          - `src/modes/mod.rs` — ModeConfig, ModeRegistry (~60 LOC)
+          - `src/modes/thread_state.rs` — ThreadModeState (~40 LOC)
+          - `modes/pm/identity.json` — PM persona (AIEOS format)
+          - `modes/pm/skills/` — PM skill manifests
+
+          **Modify:**
+          - `src/config/schema.rs` — add [modes] section
+
+          **Details:**
+          1. Add [modes.pm] to config schema with identity, skills, tools, visual_identity, response_policy
+          2. ModeRegistry::from_config() reads Config → builds S1
+          3. ModeRegistry::build_agent() creates Agent via AgentBuilder
+          4. parse_mode_activation() extracts mode from "@zeroclaw [pm]"
+          5. ThreadModeState::get_or_create() returns Agent for thread
+          6. get_visual_identity() returns username + icon_emoji
+          7. Wire route_event → parse mode → get/create Agent → visual identity → send
+
+          **Test:** Unit tests for parse_mode_activation, ModeRegistry, ThreadModeState.
+          **Demo:** @zeroclaw [pm] → PM-branded response.
+
+          ## Session Notes
+          Write notes to `docs/sessions/w2-mode-layer-notes.md`.
+
+  - name: 'Wave 3: Agent Intelligence'
+    serial: true
+    repo_context: zeroclaw
+    sessions:
+      - topic: agent-ollama
+        stage: build
+        dependsOn: mode-layer
+        prompt: |
+          # Wave 3: Agent Intelligence (V4)
+
+          ## Context
+          NanoClaw is a ZeroClaw fork (Rust). Working in ~/Github/zeroclaw on `dev` branch.
+
+          Read these first:
+          - `CLAUDE.md`
+          - `docs/planning/breadboard.md` — V4 slice table
+          - `src/agent/agent.rs` — Agent::process_message()
+          - `src/agent/prompt.rs` — SystemPromptBuilder, PromptSection trait
+          - `src/providers/ollama.rs` — OllamaProvider
+
+          ## What to Build
+
+          Wire mode Agent instances to Ollama. Add ResponsePolicySection.
+          Full conversational pipeline through the agent loop.
+
+          **Breadboard affordances:** N10, N11, N12, N20, N21, U4
+
+          **Create:**
+          - `src/modes/response_policy.rs` — ResponsePolicySection (~20 LOC)
+
+          **Details:**
+          1. Implement ResponsePolicySection (PromptSection trait)
+          2. Wire mode Agent's SystemPromptBuilder to include it
+          3. Configure Ollama for Qwen 3 14B
+          4. Wire full pipeline: route → Agent → process_message → Ollama → send
+          5. Error handling: timeouts, model not loaded, malformed response
+
+          **Test:** Unit test for ResponsePolicySection, integration with mocked Ollama.
+          **Demo:** Ask question → Ollama reasons → PM-flavored response.
+
+          ## Session Notes
+          Write notes to `docs/sessions/w3-agent-ollama-notes.md`.
+
+  - name: 'Wave 4: Tools & Gating'
+    serial: false
+    repo_context: zeroclaw
+    sessions:
+      - topic: linear-tool
+        stage: build
+        dependsOn: agent-ollama
+        prompt: |
+          # Wave 4A: Linear Tool (V5)
+
+          ## Context
+          NanoClaw is a ZeroClaw fork (Rust). Working in ~/Github/zeroclaw.
+          If running parallel with wake-sleep session, use a feature branch.
+
+          Read these first:
+          - `CLAUDE.md`
+          - `docs/planning/breadboard.md` — V5 slice table
+          - `src/tools/traits.rs` — Tool trait
+          - `examples/custom_tool.rs` — registration pattern
+          - `src/tools/mod.rs` — all_tools_with_runtime()
+
+          ## What to Build
+
+          LinearTool implementing ZeroClaw's Tool trait. Raw GraphQL over reqwest
+          for issue CRUD, initiatives, and templates. ~400 LOC.
+
+          **Breadboard affordances:** N13, N14, N15, N16, S4, U13
+
+          **Create:**
+          - `src/tools/linear.rs` (~400 LOC)
+
+          **Modify:**
+          - `src/tools/mod.rs` — register LinearTool
+          - `src/config/schema.rs` — add [tools.linear] config
+
+          **Operations to implement:**
+          - create_issue (title, description, template, labels, assignee)
+          - list_issues (by project, status, assignee)
+          - update_issue (status, labels, assignee)
+          - get_initiative (with child issues)
+          - list_templates (available issue templates)
+
+          **Test:** Unit tests for GraphQL query construction, response parsing.
+          **Demo:** "Create an issue for auth refactoring" → Linear issue + link.
+
+          ## Session Notes
+          Write notes to `docs/sessions/w4a-linear-tool-notes.md`.
+
+      - topic: wake-sleep
+        stage: build
+        dependsOn: agent-ollama
+        prompt: |
+          # Wave 4B: Wake/Sleep Engine (V7)
+
+          ## Context
+          NanoClaw is a ZeroClaw fork (Rust). Working in ~/Github/zeroclaw.
+          If running parallel with linear-tool session, use a feature branch.
+
+          Read these first:
+          - `CLAUDE.md`
+          - `docs/planning/breadboard.md` — V7 slice table
+          - `src/channels/slack.rs` — current filter_event() stub
+
+          ## What to Build
+
+          Wake/sleep engine: per-thread state machine, inactivity timer,
+          discretionary response logic. Replace filter_event() stub. ~150 LOC.
+
+          **Breadboard affordances:** N2, N17, N18, N19, S3, U2, U8
+
+          **Create:**
+          - `src/wake_sleep.rs` (~150 LOC)
+
+          **Modify:**
+          - `src/channels/slack.rs` — replace filter_event() stub
+
+          **Details:**
+          1. WakeSleepEngine with HashMap<ThreadId, WakeState>
+          2. on_event(): @mention → wake, active thread → reset timer, sleeping → discard
+          3. inactivity_timer: per-thread tokio timer (~1hr), fires sleep transition
+          4. should_respond(): discretionary logic for non-tagged messages
+          5. Replace filter_event() stub with real wake/sleep checking
+
+          **Test:** Unit tests for state transitions, timer logic.
+          **Demo:** Bot sleeps after inactivity, wakes on @mention.
+
+          ## Session Notes
+          Write notes to `docs/sessions/w4b-wake-sleep-notes.md`.
+
+  - name: 'Wave 5: Interactive Flows'
+    serial: true
+    repo_context: zeroclaw
+    sessions:
+      - topic: confirm-edit-cancel
+        stage: build
+        dependsOn: linear-tool
+        prompt: |
+          # Wave 5: Interactive Flows (V6)
+
+          ## Context
+          NanoClaw is a ZeroClaw fork (Rust). Working in ~/Github/zeroclaw on `dev` branch.
+
+          Read these first:
+          - `CLAUDE.md`
+          - `docs/planning/breadboard.md` — V6 slice table
+          - `src/channels/slack.rs` — current route_event and send
+
+          ## What to Build
+
+          Block Kit action handlers for confirm/edit/cancel flow. Modal views
+          for issue preview. Full interactive issue creation pipeline.
+
+          **Breadboard affordances:** N26, N27, N28, U5, U9, U10, U11, U12, U13
+
+          **Modify:**
+          - `src/channels/slack.rs` — add handle_block_action(), open_modal(),
+            handle_view_submission()
+
+          **Details:**
+          1. handle_block_action(): parse payload, route to Agent (not directly to tools)
+          2. open_modal(): Block Kit modal view JSON, call views.open
+          3. handle_view_submission(): parse submission, route to Agent
+          4. Block Kit templates: draft with buttons, preview modal, confirmation
+          5. Wire route_event: block_action → handler, view_submission → handler
+
+          **Test:** Unit tests for payload parsing, Block Kit JSON construction.
+          **Demo:** Draft issue → Confirm → filed in Linear → confirmation with link.
+
+          ## Session Notes
+          Write notes to `docs/sessions/w5-confirm-edit-cancel-notes.md`.
+
+  - name: 'Wave 6: Webhooks & Lifecycle'
+    serial: true
+    repo_context: zeroclaw
+    sessions:
+      - topic: webhooks-lifecycle
+        stage: build
+        dependsOn: linear-tool
+        prompt: |
+          # Wave 6: Webhooks & Lifecycle (V8)
+
+          ## Context
+          NanoClaw is a ZeroClaw fork (Rust). Working in ~/Github/zeroclaw on `dev` branch.
+
+          Read these first:
+          - `CLAUDE.md`
+          - `docs/planning/breadboard.md` — V8 slice, Flows 4-5
+          - `src/main.rs` — startup wiring
+
+          ## What to Build
+
+          HTTP webhook endpoint for Linear/GitHub inbound events. Channel-project
+          lifecycle automation.
+
+          **Breadboard affordances:** N29, N22, N23, U17
+
+          **Create:**
+          - `src/webhook.rs` — HTTP endpoint (~70 LOC)
+          - `src/tools/slack_ops.rs` — channel lifecycle (~80 LOC)
+
+          **Modify:**
+          - `src/main.rs` — add webhook listener to startup
+
+          **Details:**
+          1. receive_webhook(): HTTP POST, parse Linear/GitHub payloads, verify signatures
+          2. detect_channel_project_link(): parse channel desc for Linear URL, fallback #prj- prefix
+          3. create_project_channel(): Slack conversations.create, set desc, notify
+          4. Wire startup to start webhook listener alongside Socket Mode
+          5. Cloudflare Tunnel config in docker-compose.yml
+
+          **Test:** Unit tests for webhook parsing, channel slug generation.
+          **Demo:** Create Linear project → #prj-slug channel auto-created.
+
+          ## Session Notes
+          Write notes to `docs/sessions/w6-webhooks-lifecycle-notes.md`.
+
+  - name: 'Wave 7: Deployment'
+    serial: true
+    repo_context: zeroclaw
+    sessions:
+      - topic: docker-deployment
+        stage: build
+        dependsOn: confirm-edit-cancel
+        prompt: |
+          # Wave 7: Deployment (V9)
+
+          ## Context
+          NanoClaw is a ZeroClaw fork (Rust). Working in ~/Github/zeroclaw on `dev` branch.
+
+          Read these first:
+          - `CLAUDE.md`
+          - `docs/planning/breadboard.md` — V9 slice
+          - `docker-compose.yml` — existing skeleton from Wave 0
+          - `Dockerfile` — existing skeleton
+
+          ## What to Build
+
+          Production Docker Compose deployment. Finalize Dockerfile, compose config,
+          Ollama model management, Cloudflare Tunnel, error handling.
+
+          **Breadboard affordances:** N25 (containerized), U14
+
+          **Modify:**
+          - `docker-compose.yml` — finalize services, health checks, networks
+          - `Dockerfile` — finalize multi-stage build
+
+          **Create:**
+          - `scripts/ollama-setup.sh` — model pull + health check
+          - `config/zeroclaw.toml` — production config template
+          - `.env.example` — secrets template
+
+          **Details:**
+          1. Dockerfile: rust:latest builder → debian-slim runtime
+          2. docker-compose.yml: zeroclaw, ollama (GPU), tunnel (cloudflared)
+          3. Health checks, restart policies, shared network
+          4. Ollama model pull script
+          5. Graceful error handling (U14): Ollama timeout, Slack disconnect, Linear errors
+
+          **Test:** docker compose build, docker compose up, end-to-end message flow.
+          **Demo:** docker compose up → full system operational.
+
+          ## Session Notes
+          Write notes to `docs/sessions/w7-docker-deployment-notes.md`.

@@ -15,6 +15,7 @@
 //! To add a new tool, implement [`Tool`] in a new submodule and register it in
 //! [`all_tools_with_runtime`]. See `AGENTS.md` §7.3 for the full change playbook.
 
+pub mod ask_user;
 pub mod browser;
 pub mod browser_open;
 pub mod cli_discovery;
@@ -40,6 +41,7 @@ pub mod hardware_memory_map;
 pub mod hardware_memory_read;
 pub mod http_request;
 pub mod image_info;
+pub mod linear;
 pub mod memory_forget;
 pub mod memory_recall;
 pub mod memory_store;
@@ -55,6 +57,7 @@ pub mod traits;
 pub mod web_fetch;
 pub mod web_search_tool;
 
+pub use ask_user::AskUserTool;
 pub use browser::{BrowserTool, ComputerUseConfig};
 pub use browser_open::BrowserOpenTool;
 pub use composio::ComposioTool;
@@ -79,6 +82,7 @@ pub use hardware_memory_map::HardwareMemoryMapTool;
 pub use hardware_memory_read::HardwareMemoryReadTool;
 pub use http_request::HttpRequestTool;
 pub use image_info::ImageInfoTool;
+pub use linear::LinearTool;
 pub use memory_forget::MemoryForgetTool;
 pub use memory_recall::MemoryRecallTool;
 pub use memory_store::MemoryStoreTool;
@@ -210,6 +214,7 @@ pub fn all_tools_with_runtime(
     root_config: &crate::config::Config,
 ) -> Vec<Box<dyn Tool>> {
     let mut tool_arcs: Vec<Arc<dyn Tool>> = vec![
+        Arc::new(AskUserTool),
         Arc::new(ShellTool::new(security.clone(), runtime)),
         Arc::new(FileReadTool::new(security.clone())),
         Arc::new(FileWriteTool::new(security.clone())),
@@ -295,6 +300,33 @@ pub fn all_tools_with_runtime(
             root_config.web_search.max_results,
             root_config.web_search.timeout_secs,
         )));
+    }
+
+    // Linear integration tool (enabled by [linear] config section)
+    if root_config.linear.enabled {
+        let api_key = root_config
+            .linear
+            .api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
+        let team_id = root_config
+            .linear
+            .team_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
+
+        if let (Some(api_key), Some(team_id)) = (api_key, team_id) {
+            match LinearTool::new(api_key.to_string(), team_id.to_string()) {
+                Ok(tool) => tool_arcs.push(Arc::new(tool)),
+                Err(e) => tracing::warn!("linear: failed to initialize tool — {e}"),
+            }
+        } else {
+            tracing::warn!(
+                "linear.enabled = true but api_key or team_id is missing or blank — tool not registered"
+            );
+        }
     }
 
     // PDF extraction (feature-gated at compile time via rag-pdf)
@@ -405,6 +437,7 @@ mod tests {
         );
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         assert!(!names.contains(&"browser_open"));
+        assert!(names.contains(&"ask_user"));
         assert!(names.contains(&"schedule"));
         assert!(names.contains(&"model_routing_config"));
         assert!(names.contains(&"pushover"));

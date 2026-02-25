@@ -1,0 +1,63 @@
+# ZeroClaw Fork — Single-bot Configuration Example
+#
+# For the multi-bot Mattermost hub, use the per-bot config files instead:
+#   config/sokka.example.toml, config/katara.example.toml, etc.
+#
+# This file shows the general single-bot pattern (upstream style).
+# Copy to config/config.toml and fill in your values.
+# config/config.toml is gitignored — never commit real secrets.
+
+workspace_dir       = "/zeroclaw-data/workspace"
+config_path         = "/zeroclaw-data/.zeroclaw/config.toml"
+
+# Ollama base URL. host.docker.internal resolves to the Mac host from inside the container.
+# Change to http://localhost:11434 for local runs outside Docker.
+api_url             = "http://host.docker.internal:11434"
+default_provider    = "ollama"
+default_model       = "qwen3:14b"
+default_temperature = 0.5
+
+# Tool ceiling — empty means all registered tools are offered.
+tool_allowlist = []
+
+# ── Identity ────────────────────────────────────────────────────────────────────
+# Each bot process has one identity. Point to the bot's AIEOS JSON file.
+
+[identity]
+format     = "aieos"
+aieos_path = "identities/sokka/identity.json"
+
+# ── Memory ──────────────────────────────────────────────────────────────────────
+# Each bot gets its own SQLite file for personal working memory.
+# Mattermost channel history serves as shared team memory.
+
+[memory]
+backend     = "sqlite"
+sqlite_path = "~/.zeroclaw/sokka.db"
+
+# ── Gateway ─────────────────────────────────────────────────────────────────────
+
+[gateway]
+port              = 42617
+host              = "[::]"
+allow_public_bind = true
+
+# ── Channels ────────────────────────────────────────────────────────────────────
+
+[channels_config]
+cli = false
+
+[channels_config.mattermost]
+url           = "http://localhost:8065"
+bot_token     = "REPLACE_WITH_BOT_TOKEN"
+allowed_users = ["*"]
+thread_replies = true
+mention_only   = true
+# thread_ttl_minutes = 30  # minutes of inactivity before thread continuation expires (default 30)
+
+# ── Linear ──────────────────────────────────────────────────────────────────────
+
+[linear]
+enabled = false
+# api_key = "lin_oauth_REPLACE_ME"
+# team_id = "REPLACE_ME"

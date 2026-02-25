@@ -206,6 +206,20 @@ pub struct Config {
     #[serde(default)]
     pub agents: HashMap<String, DelegateAgentConfig>,
 
+    /// Tool allowlist: if non-empty, only the named tools are offered to the model.
+    /// Useful for constrained deployments or when the model struggles with many tools.
+    /// Default: empty (all registered tools are offered).
+    /// Example: `tool_allowlist = ["linear", "memory_store", "memory_recall"]`
+    #[serde(default)]
+    pub tool_allowlist: Vec<String>,
+
+    /// Linear integration configuration (`[linear]`).
+    /// Defaults: `enabled=false`, `api_key=None`, `team_id=None`.
+    /// Compatibility: omitting the `[linear]` section is safe — defaults apply.
+    /// Rollback: remove or zero-out the `[linear]` section to disable the integration.
+    #[serde(default)]
+    pub linear: LinearConfig,
+
     /// Hooks configuration (lifecycle hooks and built-in hook toggles).
     #[serde(default)]
     pub hooks: HooksConfig,
@@ -217,6 +231,36 @@ pub struct Config {
     /// Voice transcription configuration (Whisper API via Groq).
     #[serde(default)]
     pub transcription: TranscriptionConfig,
+
+    /// Team bot registry for multi-bot delegation awareness (`[team]`).
+    /// When configured, each bot's system prompt includes a team directory
+    /// so it knows when to @mention teammates instead of attempting out-of-scope work.
+    #[serde(default)]
+    pub team: TeamConfig,
+}
+
+// ── Team Registry ──────────────────────────────────────────────
+
+/// A single bot entry in the team registry.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TeamBotEntry {
+    /// Mattermost username (without @)
+    pub username: String,
+    /// Short role label (e.g. "Dev", "PM", "DevOps")
+    pub role: String,
+    /// One-line description of when to delegate to this bot
+    pub description: String,
+}
+
+/// Team bot registry for multi-bot delegation awareness.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
+pub struct TeamConfig {
+    /// Mattermost username of the human operator (without @) for escalation @mentions
+    #[serde(default)]
+    pub human_username: Option<String>,
+    /// Ordered list of team bots
+    #[serde(default)]
+    pub bots: Vec<TeamBotEntry>,
 }
 
 /// Named provider profile definition compatible with Codex app-server style config.
@@ -274,6 +318,45 @@ fn default_max_depth() -> u32 {
 
 fn default_max_tool_iterations() -> usize {
     10
+}
+
+// ── Linear Config ────────────────────────────────────────────────
+
+/// Linear API integration configuration (`[linear]` section).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct LinearConfig {
+    /// Enable the Linear tool for the agent.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Linear API key (personal access token or OAuth token).
+    pub api_key: Option<String>,
+    /// Default team ID for issue operations.
+    pub team_id: Option<String>,
+    /// Port for the inbound webhook listener.
+    ///
+    /// When set, the daemon spawns an HTTP server on this port to receive
+    /// Linear project events and auto-create Slack channels.
+    /// Omit (or leave unset) to disable the webhook listener.
+    #[serde(default)]
+    pub webhook_port: Option<u16>,
+    /// HMAC-SHA256 signing secret from the Linear webhook settings page.
+    ///
+    /// When set, every inbound Linear request is verified against the
+    /// `linear-signature` header. Required when `webhook_port` is configured.
+    #[serde(default)]
+    pub webhook_signing_secret: Option<String>,
+    /// HMAC-SHA256 signing secret from the GitHub webhook settings page.
+    ///
+    /// When set, every inbound GitHub request is verified against the
+    /// `X-Hub-Signature-256` header. Optional; omit to accept all GitHub requests.
+    #[serde(default)]
+    pub github_webhook_signing_secret: Option<String>,
+    /// Bind address for the webhook HTTP listener. Default: `"0.0.0.0"` (all interfaces).
+    ///
+    /// Override to `"127.0.0.1"` for local development without a reverse proxy.
+    /// In Docker Compose the default `"0.0.0.0"` is appropriate.
+    #[serde(default)]
+    pub webhook_bind: Option<String>,
 }
 
 // ── Hardware Config (wizard-driven) ─────────────────────────────
@@ -457,7 +540,7 @@ fn parse_skills_prompt_injection_mode(raw: &str) -> Option<SkillsPromptInjection
 }
 
 /// Skills loading configuration (`[skills]` section).
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct SkillsConfig {
     /// Enable loading and syncing the community open-skills repository.
     /// Default: `false` (opt-in).
@@ -471,16 +554,6 @@ pub struct SkillsConfig {
     /// `full` preserves legacy behavior. `compact` keeps context small and loads skills on demand.
     #[serde(default)]
     pub prompt_injection_mode: SkillsPromptInjectionMode,
-}
-
-impl Default for SkillsConfig {
-    fn default() -> Self {
-        Self {
-            open_skills_enabled: false,
-            open_skills_dir: None,
-            prompt_injection_mode: SkillsPromptInjectionMode::default(),
-        }
-    }
 }
 
 /// Multimodal (image) handling configuration (`[multimodal]` section).
@@ -1940,18 +2013,10 @@ impl Default for HooksConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct BuiltinHooksConfig {
     /// Enable the command-logger hook (logs tool calls for auditing).
     pub command_logger: bool,
-}
-
-impl Default for BuiltinHooksConfig {
-    fn default() -> Self {
-        Self {
-            command_logger: false,
-        }
-    }
 }
 
 // ── Autonomy / Security ──────────────────────────────────────────
@@ -2528,7 +2593,7 @@ pub struct CustomTunnelConfig {
 struct ConfigWrapper<T: ChannelConfig>(std::marker::PhantomData<T>);
 
 impl<T: ChannelConfig> ConfigWrapper<T> {
-    fn new(_: &Option<T>) -> Self {
+    fn new(_: Option<&T>) -> Self {
         Self(std::marker::PhantomData)
     }
 }
@@ -2556,7 +2621,7 @@ pub struct ChannelsConfig {
     pub discord: Option<DiscordConfig>,
     /// Slack bot channel configuration.
     pub slack: Option<SlackConfig>,
-    /// Mattermost bot channel configuration.
+    /// Mattermost bot channel configuration (single bot).
     pub mattermost: Option<MattermostConfig>,
     /// Webhook channel configuration.
     pub webhook: Option<WebhookConfig>,
@@ -2604,79 +2669,79 @@ impl ChannelsConfig {
     pub fn channels_except_webhook(&self) -> Vec<(Box<dyn super::traits::ConfigHandle>, bool)> {
         vec![
             (
-                Box::new(ConfigWrapper::new(&self.telegram)),
+                Box::new(ConfigWrapper::new(self.telegram.as_ref())),
                 self.telegram.is_some(),
             ),
             (
-                Box::new(ConfigWrapper::new(&self.discord)),
+                Box::new(ConfigWrapper::new(self.discord.as_ref())),
                 self.discord.is_some(),
             ),
             (
-                Box::new(ConfigWrapper::new(&self.slack)),
+                Box::new(ConfigWrapper::new(self.slack.as_ref())),
                 self.slack.is_some(),
             ),
             (
-                Box::new(ConfigWrapper::new(&self.mattermost)),
+                Box::new(ConfigWrapper::new(self.mattermost.as_ref())),
                 self.mattermost.is_some(),
             ),
             (
-                Box::new(ConfigWrapper::new(&self.imessage)),
+                Box::new(ConfigWrapper::new(self.imessage.as_ref())),
                 self.imessage.is_some(),
             ),
             (
-                Box::new(ConfigWrapper::new(&self.matrix)),
+                Box::new(ConfigWrapper::new(self.matrix.as_ref())),
                 self.matrix.is_some(),
             ),
             (
-                Box::new(ConfigWrapper::new(&self.signal)),
+                Box::new(ConfigWrapper::new(self.signal.as_ref())),
                 self.signal.is_some(),
             ),
             (
-                Box::new(ConfigWrapper::new(&self.whatsapp)),
+                Box::new(ConfigWrapper::new(self.whatsapp.as_ref())),
                 self.whatsapp.is_some(),
             ),
             (
-                Box::new(ConfigWrapper::new(&self.linq)),
+                Box::new(ConfigWrapper::new(self.linq.as_ref())),
                 self.linq.is_some(),
             ),
             (
-                Box::new(ConfigWrapper::new(&self.wati)),
+                Box::new(ConfigWrapper::new(self.wati.as_ref())),
                 self.wati.is_some(),
             ),
             (
-                Box::new(ConfigWrapper::new(&self.nextcloud_talk)),
+                Box::new(ConfigWrapper::new(self.nextcloud_talk.as_ref())),
                 self.nextcloud_talk.is_some(),
             ),
             (
-                Box::new(ConfigWrapper::new(&self.email)),
+                Box::new(ConfigWrapper::new(self.email.as_ref())),
                 self.email.is_some(),
             ),
             (
-                Box::new(ConfigWrapper::new(&self.irc)),
+                Box::new(ConfigWrapper::new(self.irc.as_ref())),
                 self.irc.is_some()
             ),
             (
-                Box::new(ConfigWrapper::new(&self.lark)),
+                Box::new(ConfigWrapper::new(self.lark.as_ref())),
                 self.lark.is_some(),
             ),
             (
-                Box::new(ConfigWrapper::new(&self.feishu)),
+                Box::new(ConfigWrapper::new(self.feishu.as_ref())),
                 self.feishu.is_some(),
             ),
             (
-                Box::new(ConfigWrapper::new(&self.dingtalk)),
+                Box::new(ConfigWrapper::new(self.dingtalk.as_ref())),
                 self.dingtalk.is_some(),
             ),
             (
-                Box::new(ConfigWrapper::new(&self.qq)),
+                Box::new(ConfigWrapper::new(self.qq.as_ref())),
                 self.qq.is_some()
             ),
             (
-                Box::new(ConfigWrapper::new(&self.nostr)),
+                Box::new(ConfigWrapper::new(self.nostr.as_ref())),
                 self.nostr.is_some(),
             ),
             (
-                Box::new(ConfigWrapper::new(&self.clawdtalk)),
+                Box::new(ConfigWrapper::new(self.clawdtalk.as_ref())),
                 self.clawdtalk.is_some(),
             ),
         ]
@@ -2685,7 +2750,7 @@ impl ChannelsConfig {
     pub fn channels(&self) -> Vec<(Box<dyn super::traits::ConfigHandle>, bool)> {
         let mut ret = self.channels_except_webhook();
         ret.push((
-            Box::new(ConfigWrapper::new(&self.webhook)),
+            Box::new(ConfigWrapper::new(self.webhook.as_ref())),
             self.webhook.is_some(),
         ));
         ret
@@ -2845,6 +2910,14 @@ pub struct MattermostConfig {
     /// Other messages in the channel are silently ignored.
     #[serde(default)]
     pub mention_only: Option<bool>,
+    /// Minutes of inactivity before a thread is no longer considered active for continuation.
+    /// Only relevant when `mention_only = true`. Default: 30.
+    #[serde(default)]
+    pub thread_ttl_minutes: Option<u32>,
+    /// Sync bot display name, description, and avatar from the identity file at startup.
+    /// Default: true. Set to false to disable.
+    #[serde(default)]
+    pub sync_profile: Option<bool>,
 }
 
 impl ChannelConfig for MattermostConfig {
@@ -3625,10 +3698,13 @@ impl Default for Config {
             cost: CostConfig::default(),
             peripherals: PeripheralsConfig::default(),
             agents: HashMap::new(),
+            tool_allowlist: Vec::new(),
+            linear: LinearConfig::default(),
             hooks: HooksConfig::default(),
             hardware: HardwareConfig::default(),
             query_classification: QueryClassificationConfig::default(),
             transcription: TranscriptionConfig::default(),
+            team: TeamConfig::default(),
         }
     }
 }
@@ -4083,6 +4159,8 @@ impl Config {
                 &mut config.web_search.brave_api_key,
                 "config.web_search.brave_api_key",
             )?;
+
+            decrypt_optional_secret(&store, &mut config.linear.api_key, "config.linear.api_key")?;
 
             decrypt_optional_secret(
                 &store,
@@ -4708,6 +4786,12 @@ impl Config {
 
         encrypt_optional_secret(
             &store,
+            &mut config_to_save.linear.api_key,
+            "config.linear.api_key",
+        )?;
+
+        encrypt_optional_secret(
+            &store,
             &mut config_to_save.storage.provider.config.db_url,
             "config.storage.provider.config.db_url",
         )?;
@@ -4823,7 +4907,7 @@ async fn sync_directory(path: &Path) -> Result<()> {
         dir.sync_all()
             .await
             .with_context(|| format!("Failed to fsync directory metadata: {}", path.display()))?;
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(unix))]
@@ -5158,9 +5242,12 @@ default_temperature = 0.7
             cost: CostConfig::default(),
             peripherals: PeripheralsConfig::default(),
             agents: HashMap::new(),
+            tool_allowlist: Vec::new(),
+            linear: LinearConfig::default(),
             hooks: HooksConfig::default(),
             hardware: HardwareConfig::default(),
             transcription: TranscriptionConfig::default(),
+            team: TeamConfig::default(),
         };
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
@@ -5340,9 +5427,12 @@ tool_dispatcher = "xml"
             cost: CostConfig::default(),
             peripherals: PeripheralsConfig::default(),
             agents: HashMap::new(),
+            tool_allowlist: Vec::new(),
+            linear: LinearConfig::default(),
             hooks: HooksConfig::default(),
             hardware: HardwareConfig::default(),
             transcription: TranscriptionConfig::default(),
+            team: TeamConfig::default(),
         };
 
         config.save().await.unwrap();
@@ -5378,6 +5468,7 @@ tool_dispatcher = "xml"
         config.composio.api_key = Some("composio-credential".into());
         config.browser.computer_use.api_key = Some("browser-credential".into());
         config.web_search.brave_api_key = Some("brave-credential".into());
+        config.linear.api_key = Some("linear-credential".into());
         config.storage.provider.config.db_url = Some("postgres://user:pw@host/db".into());
 
         config.agents.insert(
@@ -5432,6 +5523,13 @@ tool_dispatcher = "xml"
         assert_eq!(
             store.decrypt(web_search_encrypted).unwrap(),
             "brave-credential"
+        );
+
+        let linear_encrypted = stored.linear.api_key.as_deref().unwrap();
+        assert!(crate::security::SecretStore::is_encrypted(linear_encrypted));
+        assert_eq!(
+            store.decrypt(linear_encrypted).unwrap(),
+            "linear-credential"
         );
 
         let worker = stored.agents.get("worker").unwrap();

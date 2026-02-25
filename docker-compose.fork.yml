@@ -1,0 +1,111 @@
+# ZeroClaw Fork — Docker Compose Stack (Mattermost multi-bot)
+#
+# Each bot runs as a separate zeroclaw service with its own config file.
+# Ollama runs on the HOST (not in Docker) so it can use Apple Silicon GPU (Metal).
+#
+# Prerequisites:
+#   brew install ollama && brew services start ollama && ollama pull qwen3:14b
+#
+# Quick start:
+#   # Copy and fill in bot tokens for each bot config:
+#   cp config/sokka.example.toml config/sokka.toml   # (sokka.toml is gitignored; fill in bot_token)
+#   # Fill in bot_token in each config file
+#   docker compose -f docker-compose.fork.yml up -d
+
+x-zeroclaw-bot: &zeroclaw-bot
+  build:
+    context: .
+    dockerfile: Dockerfile
+    target: dev
+  restart: unless-stopped
+  command: ["start"]
+  environment:
+    - RUST_LOG=zeroclaw=info
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  networks:
+    - fork-net
+  volumes:
+    - ./identities:/zeroclaw-data/workspace/identities:ro
+  healthcheck:
+    test: ["CMD", "curl", "-f", "http://localhost:42617/health"]
+    interval: 30s
+    timeout: 10s
+    retries: 3
+    start_period: 15s
+  deploy:
+    resources:
+      limits:
+        cpus: '1'
+        memory: 512M
+      reservations:
+        cpus: '0.1'
+        memory: 128M
+
+services:
+
+  # ── Sokka (Dev Bot) ─────────────────────────────────────────────
+  sokka:
+    <<: *zeroclaw-bot
+    container_name: zeroclaw-sokka
+    volumes:
+      - ./config/sokka.toml:/zeroclaw-data/.zeroclaw/config.toml:ro
+      - ./identities:/zeroclaw-data/workspace/identities:ro
+      - sokka-workspace:/zeroclaw-data/workspace
+
+  # ── Katara (PM Bot) ─────────────────────────────────────────────
+  katara:
+    <<: *zeroclaw-bot
+    container_name: zeroclaw-katara
+    volumes:
+      - ./config/katara.toml:/zeroclaw-data/.zeroclaw/config.toml:ro
+      - ./identities:/zeroclaw-data/workspace/identities:ro
+      - katara-workspace:/zeroclaw-data/workspace
+
+  # ── Toph (DevOps Bot) ───────────────────────────────────────────
+  toph:
+    <<: *zeroclaw-bot
+    container_name: zeroclaw-toph
+    volumes:
+      - ./config/toph.toml:/zeroclaw-data/.zeroclaw/config.toml:ro
+      - ./identities:/zeroclaw-data/workspace/identities:ro
+      - toph-workspace:/zeroclaw-data/workspace
+
+  # ── Azula (Security Bot) ────────────────────────────────────────
+  azula:
+    <<: *zeroclaw-bot
+    container_name: zeroclaw-azula
+    volumes:
+      - ./config/azula.toml:/zeroclaw-data/.zeroclaw/config.toml:ro
+      - ./identities:/zeroclaw-data/workspace/identities:ro
+      - azula-workspace:/zeroclaw-data/workspace
+
+  # ── Iroh (Creative Bot) ─────────────────────────────────────────
+  iroh:
+    <<: *zeroclaw-bot
+    container_name: zeroclaw-iroh
+    volumes:
+      - ./config/iroh.toml:/zeroclaw-data/.zeroclaw/config.toml:ro
+      - ./identities:/zeroclaw-data/workspace/identities:ro
+      - iroh-workspace:/zeroclaw-data/workspace
+
+  # ── Aang (Coordinator Bot) ──────────────────────────────────────
+  aang:
+    <<: *zeroclaw-bot
+    container_name: zeroclaw-aang
+    volumes:
+      - ./config/aang.toml:/zeroclaw-data/.zeroclaw/config.toml:ro
+      - ./identities:/zeroclaw-data/workspace/identities:ro
+      - aang-workspace:/zeroclaw-data/workspace
+
+networks:
+  fork-net:
+    driver: bridge
+
+volumes:
+  sokka-workspace:
+  katara-workspace:
+  toph-workspace:
+  azula-workspace:
+  iroh-workspace:
+  aang-workspace:

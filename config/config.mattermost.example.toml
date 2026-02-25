@@ -1,0 +1,14 @@
+# ZeroClaw — Mattermost Hub: per-bot config files
+#
+# Each bot runs as a separate zeroclaw process with its own config file.
+# See config/<botname>.example.toml for each bot's identity, tools, and channel config.
+# Copy to config/<botname>.toml and fill in bot_token before running.
+#
+# Bots: sokka (dev), katara (pm), toph (devops), azula (security), iroh (creative), aang (coordinator)
+#
+# Quick start (single bot):
+#   cp config/sokka.example.toml config/sokka.toml
+#   # edit config/sokka.toml — set bot_token
+#   zeroclaw start --config config/sokka.toml
+#
+# See docker-compose.fork.yml for multi-bot Docker Compose setup.

@@ -360,6 +360,9 @@ pub(crate) async fn deliver_announcement(
                 mm.allowed_users.clone(),
                 mm.thread_replies.unwrap_or(true),
                 mm.mention_only.unwrap_or(false),
+                mm.thread_ttl_minutes.unwrap_or(30),
+                None, // no profile sync for cron send
+                false,
             );
             channel.send(&SendMessage::new(output, target)).await?;
         }

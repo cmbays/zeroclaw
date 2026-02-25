@@ -11,6 +11,10 @@ docker-compose.override.yml
 
 # Environment files (may contain secrets)
 .env
+.env.fork
+
+# Fork config (contains Slack/Linear secrets — never commit)
+config/config.toml
 
 # Python virtual environments
 
@@ -29,3 +33,14 @@ venv/
 *.pem
 credentials.json
 .worktrees/
+
+# Mattermost Hub secrets (templates are committed, actuals are not)
+infra/mattermost/.env
+.envrc.mattermost
+config/config.mattermost.toml
+config/sokka.toml
+config/katara.toml
+config/toph.toml
+config/azula.toml
+config/iroh.toml
+config/aang.toml
