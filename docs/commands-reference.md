@@ -208,6 +208,25 @@ Skill manifests (`SKILL.toml`) support `prompts` and `[[tools]]`; both are injec
 - `zeroclaw peripheral setup-uno-q [--host <ip_or_host>]`
 - `zeroclaw peripheral flash-nucleo`
 
+### `setup`
+
+Provision a Mattermost workspace from a TOML manifest. All operations are idempotent — safe to re-run.
+
+- `zeroclaw setup channels --manifest <path> --team <team>`
+- `zeroclaw setup channels --manifest <path> --url <url> --token <token> --team <team>`
+- `zeroclaw setup channels --manifest <path> --dry-run`
+
+Credential lookup order (highest priority first): `--url`/`--token` flags → `MM_URL`/`MM_ADMIN_TOKEN` env vars → `[mattermost]` block in the manifest.
+
+What it does:
+
+- Creates channels from manifest (prefixed per-repo or global)
+- Adds bots as members (skips bots that are already members)
+- Creates incoming webhooks for designated alert channels (prints the hook URL)
+- Sets up sidebar categories for the admin user (groups channels by repo)
+
+See `setup-manifest.example.toml` for the full manifest format.
+
 ## Validation Tip
 
 To verify docs against your current binary quickly:

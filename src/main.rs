@@ -77,6 +77,7 @@ mod providers;
 mod runtime;
 mod security;
 mod service;
+mod setup;
 mod skillforge;
 mod skills;
 mod tools;
@@ -440,6 +441,16 @@ Examples:
         config_command: ConfigCommands,
     },
 
+    /// Provision Mattermost workspace from a manifest (channels, bots, webhooks)
+    #[command(long_about = "\
+Provision a Mattermost workspace from a manifest file.
+
+Idempotent: safe to re-run. See 'zeroclaw setup channels --help' for details.")]
+    Setup {
+        #[command(subcommand)]
+        setup_command: SetupCommands,
+    },
+
     /// Generate shell completion script to stdout
     #[command(long_about = "\
 Generate shell completion scripts for `zeroclaw`.
@@ -657,6 +668,43 @@ enum MemoryCommands {
     },
 }
 
+#[derive(Subcommand, Debug)]
+enum SetupCommands {
+    /// Provision Mattermost channels and bot memberships from a manifest
+    #[command(long_about = "\
+Provision Mattermost channels and bot memberships from a manifest.
+
+Creates channels, adds bots as members, optionally creates incoming webhooks, \
+and sets up sidebar categories for the admin user. All operations are idempotent \
+— safe to re-run against an already-provisioned workspace.
+
+The manifest is a TOML file that defines repos, global channels, and bot assignments. \
+Mattermost URL and admin token can be provided via --url/--token flags, \
+MM_URL/MM_ADMIN_TOKEN environment variables, or a [mattermost] block in the manifest.
+
+Examples:
+  zeroclaw setup channels --manifest setup-manifest.toml --team my-team
+  MM_ADMIN_TOKEN=... zeroclaw setup channels --manifest setup.toml
+  zeroclaw setup channels --manifest setup.toml --dry-run")]
+    Channels {
+        /// Path to the setup manifest TOML file
+        #[arg(long, default_value = "setup-manifest.toml")]
+        manifest: String,
+        /// Mattermost server URL (overrides MM_URL env and manifest [mattermost] url)
+        #[arg(long)]
+        url: Option<String>,
+        /// Mattermost admin token (overrides MM_ADMIN_TOKEN env and manifest [mattermost] token)
+        #[arg(long)]
+        token: Option<String>,
+        /// Mattermost team name to provision channels in
+        #[arg(long)]
+        team: Option<String>,
+        /// Preview changes without making any API calls
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
 async fn main() -> Result<()> {
@@ -747,6 +795,19 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Setup provisions Mattermost — no zeroclaw config needed, just URL + token + manifest.
+    if let Commands::Setup { setup_command } = cli.command {
+        return match setup_command {
+            SetupCommands::Channels {
+                manifest,
+                url,
+                token,
+                team,
+                dry_run,
+            } => setup::handle_channels(manifest, url, token, team, dry_run).await,
+        };
+    }
+
     // All other commands need config loaded first
     let mut config = Config::load_or_init().await?;
     config.apply_env_overrides();
@@ -768,6 +829,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Onboard { .. } => unreachable!(),
         Commands::Completions { .. } => unreachable!(),
+        Commands::Setup { .. } => unreachable!(),
 
         Commands::Agent {
             message,

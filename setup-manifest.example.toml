@@ -1,0 +1,49 @@
+# setup-manifest.example.toml
+#
+# Example manifest for `zeroclaw setup channels`.
+# Copy to setup-manifest.toml, fill in your values, then run:
+#
+#   MM_ADMIN_TOKEN=<your-admin-token> zeroclaw setup channels --team <team-name>
+#
+# All operations are idempotent — safe to re-run.
+
+# ── Mattermost connection ─────────────────────────────────────────────────────
+# These can also be set via CLI flags (--url, --token, --team) or env vars
+# (MM_URL, MM_ADMIN_TOKEN). CLI flags take highest priority, then env vars,
+# then this block.
+[mattermost]
+url   = "http://localhost:8065"
+# token = "..."   # prefer MM_ADMIN_TOKEN env var; never commit a real token
+team  = "zeroclaw"
+
+# ── Global channels ───────────────────────────────────────────────────────────
+# Channels shared by the whole team (no prefix). All listed bots are added to
+# every global channel.
+[global]
+channels = ["general", "alerts", "standup", "decisions"]
+bots     = ["sokka", "toph", "azula", "iroh", "katara", "aang"]
+# channels listed here will also receive an incoming webhook (prints URL on create)
+webhooks = ["alerts"]
+
+# ── Repo / project groups ─────────────────────────────────────────────────────
+# Each [[repos]] entry creates prefixed channels: {prefix}-{channel}.
+# bots."all" → added to every channel in this repo.
+# bots."<channel>" → added only to that specific channel (in addition to "all").
+
+[[repos]]
+prefix   = "zc"
+name     = "zeroclaw"
+channels = ["general", "ops", "ci"]
+[repos.bots]
+all  = ["sokka"]
+ops  = ["toph", "azula"]
+ci   = ["toph"]
+# webhooks = ["ops"]   # uncomment to create an incoming webhook for zc-ops
+
+[[repos]]
+prefix   = "pb"
+name     = "project-b"
+channels = ["general", "auth", "api", "ops"]
+[repos.bots]
+all  = ["sokka", "katara"]
+ops  = ["toph"]
