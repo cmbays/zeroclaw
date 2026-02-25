@@ -27,7 +27,8 @@ thread_replies = true
 mention_only = true
 
 [team]
-human_username = "REPLACE_WITH_YOUR_MATTERMOST_USERNAME"
+# All 6 bots listed in every config (including self) — intentional: simplifies identical team blocks.
+# human_username = "your_mattermost_username"  # Optional: @mention this user when human input is needed
 
 [[team.bots]]
 username = "sokka"
