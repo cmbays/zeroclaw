@@ -79,15 +79,28 @@ pub async fn handle_channels(
         .context(
             "Mattermost URL required: --url flag, MM_URL env var, or [mattermost] url in manifest",
         )?;
+    // In dry-run mode the token is optional — no API calls will be made.
     let token = token
         .or_else(|| manifest.mattermost.as_ref().and_then(|m| m.token.clone()))
         .or_else(|| std::env::var("MM_ADMIN_TOKEN").ok())
-        .context(
-            "Admin token required: --token flag, MM_ADMIN_TOKEN env var, or [mattermost] token in manifest",
-        )?;
+        .unwrap_or_else(|| {
+            if dry_run {
+                "(dry-run)".to_string()
+            } else {
+                String::new()
+            }
+        });
+    if !dry_run && token.is_empty() {
+        anyhow::bail!(
+            "Admin token required: --token flag, MM_ADMIN_TOKEN env var, or [mattermost] token in manifest"
+        );
+    }
     let team_name = team
         .or_else(|| manifest.mattermost.as_ref().map(|m| m.team.clone()))
-        .context("Team name required: --team flag or [mattermost] team in manifest")?;
+        .or_else(|| std::env::var("MM_TEAM").ok())
+        .context(
+            "Team name required: --team flag, MM_TEAM env var, or [mattermost] team in manifest",
+        )?;
 
     let base_url = base_url.trim_end_matches('/').to_string();
     let client = Client::new();
@@ -96,10 +109,16 @@ pub async fn handle_channels(
         println!("[dry-run] No API calls will be made.\n");
     }
 
-    let team_id = api_get_team_id(&client, &base_url, &token, &team_name).await?;
-    println!("Team: {team_name} (id: {team_id})");
-
-    let admin_user_id = api_get_my_user_id(&client, &base_url, &token).await?;
+    // In dry-run mode skip the network round-trips and use placeholder IDs.
+    let (team_id, admin_user_id) = if dry_run {
+        println!("Team: {team_name} (dry-run)");
+        ("dry-run-team-id".to_string(), "dry-run-user-id".to_string())
+    } else {
+        let tid = api_get_team_id(&client, &base_url, &token, &team_name).await?;
+        println!("Team: {team_name} (id: {tid})");
+        let uid = api_get_my_user_id(&client, &base_url, &token).await?;
+        (tid, uid)
+    };
 
     // username → user_id cache to avoid duplicate lookups
     let mut user_cache: HashMap<String, String> = HashMap::new();
@@ -203,6 +222,15 @@ pub async fn handle_channels(
 // Mattermost API helpers
 // ---------------------------------------------------------------------------
 
+/// Extract a safe error message from a Mattermost API error response.
+/// Only exposes the `message` field — avoids dumping full bodies that may
+/// contain request metadata.
+fn mm_error_msg(body: &Value) -> &str {
+    body.get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("(no message)")
+}
+
 async fn api_get_team_id(
     client: &Client,
     base_url: &str,
@@ -218,7 +246,8 @@ async fn api_get_team_id(
     let status = resp.status();
     let body: Value = resp.json().await.context("parse team response")?;
     if !status.is_success() {
-        bail!("team '{team_name}' not found: {status} — {body}");
+        let msg = mm_error_msg(&body);
+        bail!("team '{team_name}' not found: {status} — {msg}");
     }
     body.get("id")
         .and_then(|v| v.as_str())
@@ -249,6 +278,11 @@ async fn ensure_channel(
     channel_name: &str,
     dry_run: bool,
 ) -> Result<String> {
+    if dry_run {
+        println!("  #{channel_name}  (dry-run)");
+        return Ok(format!("dry-run-id-{channel_name}"));
+    }
+
     let check = client
         .get(format!(
             "{base_url}/api/v4/teams/{team_id}/channels/name/{channel_name}"
@@ -270,9 +304,6 @@ async fn ensure_channel(
     }
 
     println!("  #{channel_name}  creating...");
-    if dry_run {
-        return Ok(format!("dry-run-id-{channel_name}"));
-    }
 
     let resp = client
         .post(format!("{base_url}/api/v4/channels"))
@@ -289,7 +320,8 @@ async fn ensure_channel(
     let status = resp.status();
     let body: Value = resp.json().await.context("parse create channel response")?;
     if !status.is_success() {
-        bail!("failed to create #{channel_name}: {status} — {body}");
+        let msg = mm_error_msg(&body);
+        bail!("failed to create #{channel_name}: {status} — {msg}");
     }
     let id = body
         .get("id")
@@ -320,7 +352,8 @@ async fn resolve_user(
     let status = resp.status();
     let body: Value = resp.json().await.context("parse user response")?;
     if !status.is_success() {
-        bail!("user '{username}' not found: {status} — {body}");
+        let msg = mm_error_msg(&body);
+        bail!("user '{username}' not found: {status} — {msg}");
     }
     let id = body
         .get("id")
@@ -343,6 +376,10 @@ async fn add_members(
     dry_run: bool,
 ) -> Result<()> {
     for bot in bots {
+        if dry_run {
+            println!("    + @{bot}  (dry-run)");
+            continue;
+        }
         let user_id = match resolve_user(client, base_url, token, bot, user_cache).await {
             Ok(id) => id,
             Err(e) => {
@@ -350,10 +387,6 @@ async fn add_members(
                 continue;
             }
         };
-        if dry_run {
-            println!("    + @{bot}  (dry-run)");
-            continue;
-        }
         let resp = client
             .post(format!("{base_url}/api/v4/channels/{channel_id}/members"))
             .bearer_auth(token)
@@ -366,11 +399,14 @@ async fn add_members(
             println!("    + @{bot}  added");
         } else {
             let body: Value = resp.json().await.unwrap_or_default();
-            let msg = body.get("message").and_then(|v| v.as_str()).unwrap_or("");
-            if msg.to_lowercase().contains("already") {
+            // Mattermost returns error id "api.channel.add_member.exists.app_error"
+            // when the user is already a channel member.
+            let err_id = body.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            if err_id.contains("exists") {
                 println!("    + @{bot}  already a member");
             } else {
-                bail!("failed to add @{bot}: {status} — {body}");
+                let msg = mm_error_msg(&body);
+                bail!("failed to add @{bot}: {status} — {msg}");
             }
         }
     }
@@ -406,14 +442,16 @@ async fn create_incoming_webhook(
     let status = resp.status();
     let body: Value = resp.json().await.context("parse webhook response")?;
     if !status.is_success() {
-        warn!("could not create webhook for #{channel_name}: {status} — {body}");
+        let msg = mm_error_msg(&body);
+        warn!("could not create webhook for #{channel_name}: {status} — {msg}");
         return Ok(());
     }
     let hook_token = body
         .get("token")
         .and_then(|v| v.as_str())
         .unwrap_or("(unknown)");
-    println!("    webhook #{channel_name}: {base_url}/hooks/{hook_token}");
+    // The hook URL contains a secret token — store it securely, do not commit or share.
+    println!("    webhook #{channel_name} [SECRET URL]: {base_url}/hooks/{hook_token}");
     Ok(())
 }
 
