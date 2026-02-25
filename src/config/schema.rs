@@ -231,6 +231,36 @@ pub struct Config {
     /// Voice transcription configuration (Whisper API via Groq).
     #[serde(default)]
     pub transcription: TranscriptionConfig,
+
+    /// Team bot registry for multi-bot delegation awareness (`[team]`).
+    /// When configured, each bot's system prompt includes a team directory
+    /// so it knows when to @mention teammates instead of attempting out-of-scope work.
+    #[serde(default)]
+    pub team: TeamConfig,
+}
+
+// ── Team Registry ──────────────────────────────────────────────
+
+/// A single bot entry in the team registry.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TeamBotEntry {
+    /// Mattermost username (without @)
+    pub username: String,
+    /// Short role label (e.g. "Dev", "PM", "DevOps")
+    pub role: String,
+    /// One-line description of when to delegate to this bot
+    pub description: String,
+}
+
+/// Team bot registry for multi-bot delegation awareness.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
+pub struct TeamConfig {
+    /// Mattermost username of the human operator (without @) for escalation @mentions
+    #[serde(default)]
+    pub human_username: Option<String>,
+    /// Ordered list of team bots
+    #[serde(default)]
+    pub bots: Vec<TeamBotEntry>,
 }
 
 /// Named provider profile definition compatible with Codex app-server style config.
@@ -3666,6 +3696,7 @@ impl Default for Config {
             hardware: HardwareConfig::default(),
             query_classification: QueryClassificationConfig::default(),
             transcription: TranscriptionConfig::default(),
+            team: TeamConfig::default(),
         }
     }
 }
@@ -5208,6 +5239,7 @@ default_temperature = 0.7
             hooks: HooksConfig::default(),
             hardware: HardwareConfig::default(),
             transcription: TranscriptionConfig::default(),
+            team: TeamConfig::default(),
         };
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
@@ -5392,6 +5424,7 @@ tool_dispatcher = "xml"
             hooks: HooksConfig::default(),
             hardware: HardwareConfig::default(),
             transcription: TranscriptionConfig::default(),
+            team: TeamConfig::default(),
         };
 
         config.save().await.unwrap();

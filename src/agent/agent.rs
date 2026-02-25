@@ -30,6 +30,7 @@ pub struct Agent {
     temperature: f64,
     workspace_dir: std::path::PathBuf,
     identity_config: crate::config::IdentityConfig,
+    team_config: crate::config::TeamConfig,
     skills: Vec<crate::skills::Skill>,
     skills_prompt_mode: crate::config::SkillsPromptInjectionMode,
     auto_save: bool,
@@ -52,6 +53,7 @@ pub struct AgentBuilder {
     temperature: Option<f64>,
     workspace_dir: Option<std::path::PathBuf>,
     identity_config: Option<crate::config::IdentityConfig>,
+    team_config: Option<crate::config::TeamConfig>,
     skills: Option<Vec<crate::skills::Skill>>,
     skills_prompt_mode: Option<crate::config::SkillsPromptInjectionMode>,
     auto_save: Option<bool>,
@@ -75,6 +77,7 @@ impl AgentBuilder {
             temperature: None,
             workspace_dir: None,
             identity_config: None,
+            team_config: None,
             skills: None,
             skills_prompt_mode: None,
             auto_save: None,
@@ -141,6 +144,11 @@ impl AgentBuilder {
 
     pub fn identity_config(mut self, identity_config: crate::config::IdentityConfig) -> Self {
         self.identity_config = Some(identity_config);
+        self
+    }
+
+    pub fn team_config(mut self, team_config: crate::config::TeamConfig) -> Self {
+        self.team_config = Some(team_config);
         self
     }
 
@@ -216,6 +224,7 @@ impl AgentBuilder {
                 .workspace_dir
                 .unwrap_or_else(|| std::path::PathBuf::from(".")),
             identity_config: self.identity_config.unwrap_or_default(),
+            team_config: self.team_config.unwrap_or_default(),
             skills: self.skills.unwrap_or_default(),
             skills_prompt_mode: self.skills_prompt_mode.unwrap_or_default(),
             auto_save: self.auto_save.unwrap_or(false),
@@ -336,6 +345,7 @@ impl Agent {
             .available_hints(available_hints)
             .route_model_by_hint(route_model_by_hint)
             .identity_config(config.identity.clone())
+            .team_config(config.team.clone())
             .skills(crate::skills::load_skills_with_config(
                 &config.workspace_dir,
                 config,
@@ -382,6 +392,7 @@ impl Agent {
             skills_prompt_mode: self.skills_prompt_mode,
             identity_config: Some(&self.identity_config),
             dispatcher_instructions: &instructions,
+            team_config: Some(&self.team_config),
         };
         self.prompt_builder.build(&ctx)
     }
