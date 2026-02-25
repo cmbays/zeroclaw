@@ -17,6 +17,7 @@ pub struct PromptContext<'a> {
     pub skills_prompt_mode: crate::config::SkillsPromptInjectionMode,
     pub identity_config: Option<&'a IdentityConfig>,
     pub dispatcher_instructions: &'a str,
+    pub team_config: Option<&'a crate::config::TeamConfig>,
 }
 
 pub trait PromptSection: Send + Sync {
@@ -40,6 +41,7 @@ impl SystemPromptBuilder {
                 Box::new(WorkspaceSection),
                 Box::new(DateTimeSection),
                 Box::new(RuntimeSection),
+                Box::new(TeamSection),
             ],
         }
     }
@@ -70,6 +72,7 @@ pub struct SkillsSection;
 pub struct WorkspaceSection;
 pub struct RuntimeSection;
 pub struct DateTimeSection;
+pub struct TeamSection;
 
 impl PromptSection for IdentitySection {
     fn name(&self) -> &str {
@@ -206,6 +209,39 @@ impl PromptSection for DateTimeSection {
     }
 }
 
+impl PromptSection for TeamSection {
+    fn name(&self) -> &str {
+        "team"
+    }
+
+    fn build(&self, ctx: &PromptContext<'_>) -> Result<String> {
+        let Some(team) = ctx.team_config else {
+            return Ok(String::new());
+        };
+        if team.bots.is_empty() {
+            return Ok(String::new());
+        }
+
+        let mut out = String::from("## Your Team\n\n");
+        out.push_str("You are part of a bot team on Mattermost. When a request falls outside your expertise or tool allowlist, @mention the appropriate teammate in the current thread rather than attempting it yourself.\n\n");
+        out.push_str("### Team Members\n\n");
+        for bot in &team.bots {
+            let _ = writeln!(out, "- **@{}** ({}): {}", bot.username, bot.role, bot.description);
+        }
+        if let Some(human) = &team.human_username {
+            let _ = writeln!(
+                out,
+                "- **@{human}**: Human operator — @mention when you need clarification, approval, or when the request is outside the team's scope"
+            );
+        }
+        out.push_str("\n### Delegation Rules\n\n");
+        out.push_str("- When a request falls outside your tool allowlist, @mention the appropriate team member in the current thread\n");
+        out.push_str("- When delegating, provide enough context for the receiving bot to act without asking follow-up questions\n");
+        out.push_str("- Do not attempt tasks outside your capabilities — delegate instead");
+        Ok(out)
+    }
+}
+
 fn inject_workspace_file(prompt: &mut String, workspace_dir: &Path, filename: &str) {
     let path = workspace_dir.join(filename);
     match std::fs::read_to_string(&path) {
@@ -300,6 +336,7 @@ mod tests {
             skills_prompt_mode: crate::config::SkillsPromptInjectionMode::Full,
             identity_config: Some(&identity_config),
             dispatcher_instructions: "",
+            team_config: None,
         };
 
         let section = IdentitySection;
@@ -328,6 +365,7 @@ mod tests {
             skills_prompt_mode: crate::config::SkillsPromptInjectionMode::Full,
             identity_config: None,
             dispatcher_instructions: "instr",
+            team_config: None,
         };
         let prompt = SystemPromptBuilder::with_defaults().build(&ctx).unwrap();
         assert!(prompt.contains("## Tools"));
@@ -363,6 +401,7 @@ mod tests {
             skills_prompt_mode: crate::config::SkillsPromptInjectionMode::Full,
             identity_config: None,
             dispatcher_instructions: "",
+            team_config: None,
         };
 
         let output = SkillsSection.build(&ctx).unwrap();
@@ -401,6 +440,7 @@ mod tests {
             skills_prompt_mode: crate::config::SkillsPromptInjectionMode::Compact,
             identity_config: None,
             dispatcher_instructions: "",
+            team_config: None,
         };
 
         let output = SkillsSection.build(&ctx).unwrap();
@@ -422,6 +462,7 @@ mod tests {
             skills_prompt_mode: crate::config::SkillsPromptInjectionMode::Full,
             identity_config: None,
             dispatcher_instructions: "instr",
+            team_config: None,
         };
 
         let rendered = DateTimeSection.build(&ctx).unwrap();
@@ -460,6 +501,7 @@ mod tests {
             skills_prompt_mode: crate::config::SkillsPromptInjectionMode::Full,
             identity_config: None,
             dispatcher_instructions: "",
+            team_config: None,
         };
 
         let prompt = SystemPromptBuilder::with_defaults().build(&ctx).unwrap();
@@ -475,5 +517,84 @@ mod tests {
         assert!(prompt.contains(
             "<instruction>Use &lt;tool_call&gt; and &amp; keep output &quot;safe&quot;</instruction>"
         ));
+    }
+
+    #[test]
+    fn team_section_renders_bots_and_human() {
+        let team = crate::config::TeamConfig {
+            human_username: Some("operator".into()),
+            bots: vec![
+                crate::config::TeamBotEntry {
+                    username: "sokka".into(),
+                    role: "Dev".into(),
+                    description: "Code and debugging".into(),
+                },
+                crate::config::TeamBotEntry {
+                    username: "katara".into(),
+                    role: "PM".into(),
+                    description: "Linear issues".into(),
+                },
+            ],
+        };
+        let tools: Vec<Box<dyn Tool>> = vec![];
+        let ctx = PromptContext {
+            workspace_dir: Path::new("/tmp"),
+            model_name: "test-model",
+            tools: &tools,
+            skills: &[],
+            skills_prompt_mode: crate::config::SkillsPromptInjectionMode::Full,
+            identity_config: None,
+            dispatcher_instructions: "",
+            team_config: Some(&team),
+        };
+
+        let output = TeamSection.build(&ctx).unwrap();
+        assert!(output.contains("## Your Team"));
+        assert!(output.contains("@sokka"));
+        assert!(output.contains("Dev"));
+        assert!(output.contains("Code and debugging"));
+        assert!(output.contains("@katara"));
+        assert!(output.contains("@operator"));
+        assert!(output.contains("Delegation Rules"));
+    }
+
+    #[test]
+    fn team_section_empty_when_no_config() {
+        let tools: Vec<Box<dyn Tool>> = vec![];
+        let ctx = PromptContext {
+            workspace_dir: Path::new("/tmp"),
+            model_name: "test-model",
+            tools: &tools,
+            skills: &[],
+            skills_prompt_mode: crate::config::SkillsPromptInjectionMode::Full,
+            identity_config: None,
+            dispatcher_instructions: "",
+            team_config: None,
+        };
+
+        let output = TeamSection.build(&ctx).unwrap();
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn team_section_empty_when_bots_list_is_empty() {
+        let team = crate::config::TeamConfig {
+            human_username: Some("operator".into()),
+            bots: vec![],
+        };
+        let tools: Vec<Box<dyn Tool>> = vec![];
+        let ctx = PromptContext {
+            workspace_dir: Path::new("/tmp"),
+            model_name: "test-model",
+            tools: &tools,
+            skills: &[],
+            skills_prompt_mode: crate::config::SkillsPromptInjectionMode::Full,
+            identity_config: None,
+            dispatcher_instructions: "",
+            team_config: Some(&team),
+        };
+
+        let output = TeamSection.build(&ctx).unwrap();
+        assert!(output.is_empty());
     }
 }

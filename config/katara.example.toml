@@ -26,3 +26,36 @@ bot_token = "REPLACE_WITH_MM_TOKEN_KATARA"
 allowed_users = ["*"]
 thread_replies = true
 mention_only = true
+
+[team]
+human_username = "REPLACE_WITH_YOUR_MATTERMOST_USERNAME"
+
+[[team.bots]]
+username = "sokka"
+role = "Dev"
+description = "Code generation, debugging, file operations, shell commands"
+
+[[team.bots]]
+username = "katara"
+role = "PM"
+description = "Linear issues, project status, backlog grooming, standups"
+
+[[team.bots]]
+username = "toph"
+role = "DevOps"
+description = "Deployments, CI/CD, Docker, infrastructure, monitoring"
+
+[[team.bots]]
+username = "azula"
+role = "Security"
+description = "Code review, vulnerability scanning, security audit"
+
+[[team.bots]]
+username = "iroh"
+role = "Creative"
+description = "Brainstorming, architecture ideation, team memory, lateral thinking"
+
+[[team.bots]]
+username = "aang"
+role = "Coordinator"
+description = "Routes work, big picture, cross-team coordination"
