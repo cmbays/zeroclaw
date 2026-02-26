@@ -70,6 +70,55 @@ All pipeline artifacts: `docs/planning/` (DECISIONS.md, impl-plan.md, breadboard
 - **Webhooks**: axum HTTP server (already in deps)
 - **Deployment**: Docker Compose (zeroclaw + ollama + cloudflared)
 
+### Claude Code ↔ Mattermost MCP Bridge
+
+Claude Code sessions can read and post to Mattermost directly via
+[pvev/mattermost-mcp](https://github.com/pvev/mattermost-mcp) (MIT), installed locally at
+`~/Github/mattermost-mcp`. It is **not** part of this repo — it is a separate tool install.
+
+**Registered MCP tools** (available as `mattermost_*` in every Claude Code session):
+
+| Tool | Purpose |
+|------|---------|
+| `mattermost_list_channels` | List public channels |
+| `mattermost_get_channel_history` | Read recent messages |
+| `mattermost_post_message` | Post a new message |
+| `mattermost_reply_to_thread` | Reply in a thread |
+| `mattermost_get_thread_replies` | Read thread replies |
+| `mattermost_add_reaction` | Add emoji reaction |
+| `mattermost_get_users` | List workspace users |
+
+**One-time setup** (only needed when cloning fresh or after credential rotation):
+
+```bash
+# 1. Clone and build (once)
+cd ~/Github && gh repo clone pvev/mattermost-mcp && cd mattermost-mcp
+npm install && npm run build
+
+# 2. Add MM_CLAUDE_TOKEN to .envrc.mattermost (personal access token for
+#    admin or a dedicated "claude-code" MM user). Falls back to MM_ADMIN_TOKEN.
+
+# 3. Generate config.local.json (requires Mattermost running)
+./scripts/setup-mattermost-mcp.sh
+
+# 4. Add to ~/.claude/settings.json (see below), then restart Claude Code
+```
+
+**`~/.claude/settings.json` entry** (add under `"mcpServers"`, substitute your actual path):
+
+```json
+"mcpServers": {
+  "mattermost": {
+    "command": "node",
+    "args": ["<absolute-path-to>/mattermost-mcp/build/index.js"]
+  }
+}
+```
+
+**Credentials**: `config.local.json` in the mattermost-mcp clone holds the live token and team
+ID. It is gitignored there. Regenerate it with `./scripts/setup-mattermost-mcp.sh` after
+token rotation or if the file is missing.
+
 ---
 
 # CLAUDE.md — ZeroClaw Agent Engineering Protocol (Upstream)
