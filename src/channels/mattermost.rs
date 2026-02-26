@@ -79,6 +79,9 @@ pub struct MattermostChannel {
     aieos_path: Option<String>,
     /// When true (default), sync display name, description, and avatar at startup.
     sync_profile: bool,
+    /// Optional admin token for profile sync. Required because bot tokens lack
+    /// `manage_bots` permission. Falls back to `bot_token` if unset (will 403/404).
+    admin_token: Option<String>,
 }
 
 impl MattermostChannel {
@@ -92,6 +95,7 @@ impl MattermostChannel {
         thread_ttl_minutes: u32,
         aieos_path: Option<String>,
         sync_profile: bool,
+        admin_token: Option<String>,
     ) -> Self {
         // Ensure base_url doesn't have a trailing slash for consistent path joining
         let base_url = base_url.trim_end_matches('/').to_string();
@@ -106,6 +110,7 @@ impl MattermostChannel {
             typing_handle: Mutex::new(None),
             aieos_path,
             sync_profile,
+            admin_token,
         }
     }
 
@@ -191,6 +196,13 @@ impl MattermostChannel {
             .take(128)
             .collect();
 
+        let sync_token = self
+            .admin_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .unwrap_or(&self.bot_token);
+
         if !display_name.is_empty() || !description.is_empty() {
             let body = serde_json::json!({
                 "display_name": display_name,
@@ -199,7 +211,7 @@ impl MattermostChannel {
             match self
                 .http_client()
                 .put(format!("{}/api/v4/bots/{bot_user_id}", self.base_url))
-                .bearer_auth(&self.bot_token)
+                .bearer_auth(sync_token)
                 .json(&body)
                 .send()
                 .await
@@ -209,8 +221,8 @@ impl MattermostChannel {
                 }
                 Ok(resp) if resp.status() == reqwest::StatusCode::FORBIDDEN => {
                     tracing::warn!(
-                        "Mattermost: profile sync skipped — bot lacks manage_bots permission \
-                         (status {}). Grant the permission or set sync_profile = false.",
+                        "Mattermost: profile sync skipped — token lacks manage_bots permission \
+                         (status {}). Set admin_token in [channels_config.mattermost].",
                         resp.status()
                     );
                 }
@@ -283,7 +295,7 @@ impl MattermostChannel {
                     "{}/api/v4/users/{bot_user_id}/image",
                     self.base_url
                 ))
-                .bearer_auth(&self.bot_token)
+                .bearer_auth(sync_token)
                 .multipart(form)
                 .send()
                 .await
@@ -929,6 +941,7 @@ mod tests {
             30,
             None,
             false,
+            None,
         )
     }
 
@@ -944,6 +957,7 @@ mod tests {
             30,
             None,
             false,
+            None,
         )
     }
 
@@ -959,6 +973,7 @@ mod tests {
             30,
             None,
             false,
+            None,
         );
         assert_eq!(ch.base_url, "https://mm.example.com");
     }
@@ -1403,6 +1418,7 @@ mod tests {
             30,
             None,
             false,
+            None,
         );
         assert_eq!(ch.websocket_url(), "wss://mm.example.com/api/v4/websocket");
     }
@@ -1419,6 +1435,7 @@ mod tests {
             30,
             None,
             false,
+            None,
         );
         assert_eq!(ch.websocket_url(), "ws://localhost:8065/api/v4/websocket");
     }
@@ -1435,6 +1452,7 @@ mod tests {
             30,
             None,
             false,
+            None,
         );
         // Trailing slash stripped in new(), so conversion is clean
         assert_eq!(ch.websocket_url(), "wss://mm.example.com/api/v4/websocket");
@@ -1502,6 +1520,7 @@ mod tests {
             30,
             None,
             false,
+            None,
         );
         let post_json = r#"{"id":"post1","user_id":"user1","message":"hello","create_at":1600000000001,"root_id":""}"#;
 
@@ -1613,6 +1632,7 @@ mod tests {
             30,
             None,
             false,
+            None,
         );
         let post_json = r#"{"id":"post1","user_id":"user1","message":"hello","create_at":1600000000001,"root_id":""}"#;
         let event = make_ws_event("chan1", post_json);
@@ -1648,6 +1668,7 @@ mod tests {
             30,
             None,
             false,
+            None,
         );
         assert_eq!(ch.websocket_url(), "wss://mm.example.com/api/v4/websocket");
     }
@@ -1784,6 +1805,7 @@ mod tests {
             30,
             None,
             false,
+            None,
         );
 
         // Authorized user activates the thread.

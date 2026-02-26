@@ -2,7 +2,7 @@
 # Usage: zeroclaw start --config config/iroh.toml
 
 default_provider = "ollama"
-default_model = "qwen3:14b"
+default_model = "qwen3:4b"
 api_key = "http://localhost:11434"
 default_temperature = 0.8
 
@@ -10,10 +10,11 @@ tool_allowlist = ["memory_store", "memory_recall", "ask_user"]
 
 [identity]
 format = "aieos"
-aieos_path = "identities/iroh/identity.json"
+aieos_path = "/zeroclaw-data/identities/iroh/identity.json"
 
 [memory]
 backend = "sqlite"
+auto_save = true
 sqlite_path = "~/.zeroclaw/iroh.db"
 
 [channels_config]
@@ -22,6 +23,7 @@ cli = false
 [channels_config.mattermost]
 url = "http://localhost:8065"
 bot_token = "REPLACE_WITH_MM_TOKEN_IROH"
+# admin_token = "REPLACE_WITH_MM_ADMIN_TOKEN"  # needed for profile sync (display name, bio, avatar)
 allowed_users = ["*"]
 thread_replies = true
 mention_only = true

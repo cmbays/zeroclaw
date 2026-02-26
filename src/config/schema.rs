@@ -2918,6 +2918,18 @@ pub struct MattermostConfig {
     /// Default: true. Set to false to disable.
     #[serde(default)]
     pub sync_profile: Option<bool>,
+    /// Admin personal access token for profile sync (display name, description, avatar).
+    /// Bot tokens lack `manage_bots` permission; an admin token is required for sync to work.
+    /// Generate one in Mattermost → Account Settings → Security → Personal Access Tokens.
+    ///
+    /// Default: `None` — profile sync falls back to `bot_token`, which will 403/404 on
+    /// servers that enforce `manage_bots`; a warning is logged but startup continues.
+    /// Backward-compat: omitting this field is safe; existing configs without it keep working.
+    /// Rollback: remove or comment out this key to revert to bot_token-based sync behavior.
+    /// Secret handling: this value is encrypted at rest alongside other secret fields when
+    /// `[secrets] encrypt = true` is set in config.
+    #[serde(default)]
+    pub admin_token: Option<String>,
 }
 
 impl ChannelConfig for MattermostConfig {
@@ -4180,6 +4192,14 @@ impl Config {
                 )?;
             }
 
+            if let Some(ref mut mm) = config.channels_config.mattermost {
+                decrypt_optional_secret(
+                    &store,
+                    &mut mm.admin_token,
+                    "config.channels_config.mattermost.admin_token",
+                )?;
+            }
+
             config.apply_env_overrides();
             config.validate()?;
             tracing::info!(
@@ -4805,6 +4825,14 @@ impl Config {
                 &store,
                 &mut ns.private_key,
                 "config.channels_config.nostr.private_key",
+            )?;
+        }
+
+        if let Some(ref mut mm) = config_to_save.channels_config.mattermost {
+            encrypt_optional_secret(
+                &store,
+                &mut mm.admin_token,
+                "config.channels_config.mattermost.admin_token",
             )?;
         }
 

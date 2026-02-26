@@ -3,7 +3,7 @@
 # Bot token: source .envrc.mattermost && echo $MM_TOKEN_KATARA
 
 default_provider = "ollama"
-default_model = "qwen3:14b"
+default_model = "qwen3:4b"
 api_key = "http://localhost:11434"
 default_temperature = 0.1
 
@@ -11,10 +11,11 @@ tool_allowlist = ["linear", "memory_store", "memory_recall", "memory_forget", "a
 
 [identity]
 format = "aieos"
-aieos_path = "identities/katara/identity.json"
+aieos_path = "/zeroclaw-data/identities/katara/identity.json"
 
 [memory]
 backend = "sqlite"
+auto_save = true
 sqlite_path = "~/.zeroclaw/katara.db"
 
 [channels_config]
@@ -23,6 +24,7 @@ cli = false
 [channels_config.mattermost]
 url = "http://localhost:8065"
 bot_token = "REPLACE_WITH_MM_TOKEN_KATARA"
+# admin_token = "REPLACE_WITH_MM_ADMIN_TOKEN"  # needed for profile sync (display name, bio, avatar)
 allowed_users = ["*"]
 thread_replies = true
 mention_only = true

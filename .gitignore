@@ -9,38 +9,35 @@ __pycache__/
 *.pyc
 docker-compose.override.yml
 
-# Environment files (may contain secrets)
+# Environment and secret files — never commit actuals, only *.example variants
 .env
-.env.fork
-
-# Fork config (contains Slack/Linear secrets — never commit)
-config/config.toml
-
-# Python virtual environments
-
-.venv/
-venv/
-
-# ESP32 build cache (esp-idf-sys managed)
-
-.embuild/
-.env.local
-.env.*.local
+.env.*
+*.env
+!.env.example
+!*.example.env
+.envrc.mattermost
+infra/mattermost/.env
 
 # Secret keys and credentials
 .secret_key
 *.key
 *.pem
 credentials.json
-.worktrees/
 
-# Mattermost Hub secrets (templates are committed, actuals are not)
-infra/mattermost/.env
-.envrc.mattermost
+# Python virtual environments
+.venv/
+venv/
+
+# ESP32 build cache (esp-idf-sys managed)
+.embuild/
+
+# SQLite memory databases (may contain conversation history)
+*.sqlite
+*.sqlite3
+
+# Fork live configs (contain tokens — templates/examples are committed, actuals are not)
+config/config.toml
 config/config.mattermost.toml
-config/sokka.toml
-config/katara.toml
-config/toph.toml
-config/azula.toml
-config/iroh.toml
-config/aang.toml
+config/*.toml
+!config/*.example.toml
+.worktrees/

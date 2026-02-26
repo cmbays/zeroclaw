@@ -363,6 +363,7 @@ pub(crate) async fn deliver_announcement(
                 mm.thread_ttl_minutes.unwrap_or(30),
                 None, // no profile sync for cron send
                 false,
+                None,
             );
             channel.send(&SendMessage::new(output, target)).await?;
         }

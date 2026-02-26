@@ -1,0 +1,24 @@
+# setup-manifest.toml — ATLA bot team channel provisioning
+# Run: MM_ADMIN_TOKEN=<token> zeroclaw setup channels --team zeroclaw-hq
+
+[mattermost]
+url  = "http://localhost:8065"
+team = "zeroclaw-hq"
+
+# ── Global channels ────────────────────────────────────────────────────────────
+# Shared by the whole team. All 6 bots added to every global channel.
+[global]
+channels = ["general", "alerts", "standup", "decisions", "random"]
+bots     = ["sokka", "katara", "toph", "azula", "iroh", "aang"]
+webhooks = ["alerts"]
+
+# ── zeroclaw project ───────────────────────────────────────────────────────────
+[[repos]]
+prefix   = "zc"
+name     = "zeroclaw"
+channels = ["general", "ops", "ci", "security"]
+[repos.bots]
+all      = ["sokka", "katara"]
+ops      = ["toph"]
+ci       = ["toph", "sokka"]
+security = ["azula"]
