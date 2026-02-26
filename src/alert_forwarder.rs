@@ -30,12 +30,13 @@ const CODE_BLOCK_MAX: usize = 4_000;
 /// Strip Mattermost-markdown-sensitive characters from an external payload field.
 ///
 /// Removes: `@` (mention injection), `[`, `]`, `(`, `)` (link injection),
-/// `*`, `~`, `` ` `` (formatting breakout).
+/// `*`, `~`, `` ` `` (formatting breakout), `#` (heading injection),
+/// `>` (blockquote injection).
 /// Truncates to `max_len` Unicode scalar values.
 fn sanitize_field(input: &str, max_len: usize) -> String {
     input
         .chars()
-        .filter(|c| !matches!(c, '@' | '[' | ']' | '(' | ')' | '*' | '~' | '`'))
+        .filter(|c| !matches!(c, '@' | '[' | ']' | '(' | ')' | '*' | '~' | '`' | '#' | '>'))
         .take(max_len)
         .collect()
 }
@@ -515,5 +516,45 @@ mod tests {
         assert!(!out.contains('@'));
         assert!(!out.contains('['));
         assert!(!out.contains('*'));
+    }
+
+    #[test]
+    fn sanitize_field_strips_heading_and_blockquote_chars() {
+        let out = sanitize_field("# Heading\n> Quote", 512);
+        assert!(!out.contains('#'));
+        assert!(!out.contains('>'));
+    }
+
+    #[test]
+    fn truncate_bytes_stays_on_utf8_boundary() {
+        // "日本語" is 3 chars × 3 bytes each = 9 bytes total.
+        // Truncating at 5 bytes would land mid-char; should back up to 3 (end of "日").
+        let s = "日本語";
+        assert_eq!(s.len(), 9);
+        let result = truncate_bytes(s, 5);
+        assert!(s.is_char_boundary(result.len()));
+        assert_eq!(result, "日"); // 3 bytes, first valid boundary ≤ 5
+    }
+
+    #[test]
+    fn truncate_bytes_exact_boundary_unchanged() {
+        let s = "abc";
+        assert_eq!(truncate_bytes(s, 3), "abc");
+        assert_eq!(truncate_bytes(s, 10), "abc");
+    }
+
+    #[test]
+    fn truncate_bytes_zero_max_returns_empty() {
+        assert_eq!(truncate_bytes("hello", 0), "");
+    }
+
+    #[test]
+    fn safe_http_url_rejects_control_characters() {
+        assert_eq!(
+            safe_http_url("https://example.com/\nX-Injected: header"),
+            None
+        );
+        assert_eq!(safe_http_url("https://example.com/\0null"), None);
+        assert_eq!(safe_http_url("https://example.com/\rpath"), None);
     }
 }

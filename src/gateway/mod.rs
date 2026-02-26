@@ -1570,6 +1570,24 @@ async fn handle_alerts_webhook(
         return (StatusCode::TOO_MANY_REQUESTS, Json(err));
     }
 
+    // ── Bearer token auth (pairing) — same gate as POST /webhook ──────────────
+    if state.pairing.require_pairing() {
+        let auth = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let token = auth.strip_prefix("Bearer ").unwrap_or("");
+        if !state.pairing.is_authenticated(token) {
+            tracing::warn!(
+                "/webhooks/{source}: rejected — not paired / invalid bearer token (client={rate_key})"
+            );
+            let err = serde_json::json!({
+                "error": "Unauthorized — pair first via POST /pair, then send Authorization: Bearer <token>"
+            });
+            return (StatusCode::UNAUTHORIZED, Json(err));
+        }
+    }
+
     // ── X-Webhook-Secret auth (optional, same mechanism as POST /webhook) ──
     // Set channels_config.webhook.secret and configure the same value in your
     // Vercel/Supabase/Upstash webhook settings as the custom header value.
@@ -1589,24 +1607,6 @@ async fn handle_alerts_webhook(
                 let err = serde_json::json!({"error": "Unauthorized — invalid or missing X-Webhook-Secret header"});
                 return (StatusCode::UNAUTHORIZED, Json(err));
             }
-        }
-    }
-
-    // ── Bearer token auth (pairing) — same gate as POST /webhook ──────────────
-    if state.pairing.require_pairing() {
-        let auth = headers
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        let token = auth.strip_prefix("Bearer ").unwrap_or("");
-        if !state.pairing.is_authenticated(token) {
-            tracing::warn!(
-                "/webhooks/{source}: rejected — not paired / invalid bearer token (client={rate_key})"
-            );
-            let err = serde_json::json!({
-                "error": "Unauthorized — pair first via POST /pair, then send Authorization: Bearer <token>"
-            });
-            return (StatusCode::UNAUTHORIZED, Json(err));
         }
     }
 
@@ -3184,5 +3184,24 @@ mod tests {
         .await
         .into_response();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn alerts_webhook_rejects_missing_bearer_when_pairing_required() {
+        let mut state = alerts_state(Some("http://127.0.0.1:1".to_string()));
+        // Enable pairing with a known token so require_pairing() returns true.
+        let tokens = vec!["zeroclaw_test_token".to_string()];
+        state.pairing = Arc::new(PairingGuard::new(true, &tokens));
+
+        let response = handle_alerts_webhook(
+            State(state),
+            test_connect_info(),
+            Path("vercel".to_string()),
+            HeaderMap::new(), // no Authorization header
+            Bytes::from(r#"{"type":"deployment.succeeded"}"#),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 }
