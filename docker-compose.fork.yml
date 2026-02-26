@@ -25,8 +25,6 @@ x-zeroclaw-bot: &zeroclaw-bot
     - "host.docker.internal:host-gateway"
   networks:
     - fork-net
-  volumes:
-    - ./identities:/zeroclaw-data/identities:ro
   healthcheck:
     test: ["CMD", "curl", "-f", "http://localhost:42617/health"]
     interval: 30s

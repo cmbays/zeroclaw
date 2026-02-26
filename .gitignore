@@ -13,6 +13,8 @@ docker-compose.override.yml
 .env
 .env.*
 *.env
+!.env.example
+!*.example.env
 .envrc.mattermost
 infra/mattermost/.env
 

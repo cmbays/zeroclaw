@@ -196,7 +196,12 @@ impl MattermostChannel {
             .take(128)
             .collect();
 
-        let sync_token = self.admin_token.as_deref().unwrap_or(&self.bot_token);
+        let sync_token = self
+            .admin_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .unwrap_or(&self.bot_token);
 
         if !display_name.is_empty() || !description.is_empty() {
             let body = serde_json::json!({
