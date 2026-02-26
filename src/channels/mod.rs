@@ -2737,6 +2737,7 @@ fn collect_configured_channels(
                 mm.thread_ttl_minutes.unwrap_or(30),
                 config.identity.aieos_path.clone(),
                 mm.sync_profile.unwrap_or(true),
+                mm.admin_token.clone(),
             )),
         });
     }

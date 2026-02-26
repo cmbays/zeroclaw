@@ -23,6 +23,7 @@ cli = false
 [channels_config.mattermost]
 url = "http://localhost:8065"
 bot_token = "REPLACE_WITH_MM_TOKEN_IROH"
+# admin_token = "REPLACE_WITH_MM_ADMIN_TOKEN"  # needed for profile sync (display name, bio, avatar)
 allowed_users = ["*"]
 thread_replies = true
 mention_only = true

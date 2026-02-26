@@ -2918,6 +2918,11 @@ pub struct MattermostConfig {
     /// Default: true. Set to false to disable.
     #[serde(default)]
     pub sync_profile: Option<bool>,
+    /// Admin personal access token for profile sync (display name, description, avatar).
+    /// Bot tokens lack `manage_bots` permission; an admin token is required for sync to work.
+    /// Generate one in Mattermost → Account Settings → Security → Personal Access Tokens.
+    #[serde(default)]
+    pub admin_token: Option<String>,
 }
 
 impl ChannelConfig for MattermostConfig {
