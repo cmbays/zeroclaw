@@ -2,7 +2,7 @@
 # Usage: zeroclaw start --config config/azula.toml
 
 default_provider = "ollama"
-default_model = "qwen3:14b"
+default_model = "qwen3:4b"
 api_key = "http://localhost:11434"
 default_temperature = 0.1
 
@@ -10,10 +10,11 @@ tool_allowlist = ["content_search", "file_read", "glob", "ask_user"]
 
 [identity]
 format = "aieos"
-aieos_path = "identities/azula/identity.json"
+aieos_path = "/zeroclaw-data/identities/azula/identity.json"
 
 [memory]
 backend = "sqlite"
+auto_save = true
 sqlite_path = "~/.zeroclaw/azula.db"
 
 [channels_config]

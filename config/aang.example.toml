@@ -2,7 +2,7 @@
 # Usage: zeroclaw start --config config/aang.toml
 
 default_provider = "ollama"
-default_model = "qwen3:14b"
+default_model = "qwen3:4b"
 api_key = "http://localhost:11434"
 default_temperature = 0.5
 
@@ -10,10 +10,11 @@ tool_allowlist = ["delegate", "memory_store", "memory_recall", "ask_user"]
 
 [identity]
 format = "aieos"
-aieos_path = "identities/aang/identity.json"
+aieos_path = "/zeroclaw-data/identities/aang/identity.json"
 
 [memory]
 backend = "sqlite"
+auto_save = true
 sqlite_path = "~/.zeroclaw/aang.db"
 
 [channels_config]

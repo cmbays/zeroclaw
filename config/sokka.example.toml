@@ -3,7 +3,7 @@
 # Bot token: source .envrc.mattermost && echo $MM_TOKEN_SOKKA
 
 default_provider = "ollama"
-default_model = "qwen3:14b"
+default_model = "qwen3:4b"
 # Docker: api_key = "http://zeroclaw-ollama:11434"
 api_key = "http://localhost:11434"
 default_temperature = 0.3
@@ -12,10 +12,11 @@ tool_allowlist = ["shell", "file_read", "file_write", "file_edit", "glob", "cont
 
 [identity]
 format = "aieos"
-aieos_path = "identities/sokka/identity.json"
+aieos_path = "/zeroclaw-data/identities/sokka/identity.json"
 
 [memory]
 backend = "sqlite"
+auto_save = true
 sqlite_path = "~/.zeroclaw/sokka.db"
 
 [channels_config]
