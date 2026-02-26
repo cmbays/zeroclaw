@@ -158,6 +158,9 @@ impl SlidingWindowRateLimiter {
 pub struct GatewayRateLimiter {
     pair: SlidingWindowRateLimiter,
     webhook: SlidingWindowRateLimiter,
+    /// Separate bucket for alert-forwarding endpoints so alert floods cannot
+    /// starve the main `/webhook` agent endpoint.
+    alerts: SlidingWindowRateLimiter,
 }
 
 impl GatewayRateLimiter {
@@ -166,6 +169,7 @@ impl GatewayRateLimiter {
         Self {
             pair: SlidingWindowRateLimiter::new(pair_per_minute, window, max_keys),
             webhook: SlidingWindowRateLimiter::new(webhook_per_minute, window, max_keys),
+            alerts: SlidingWindowRateLimiter::new(webhook_per_minute, window, max_keys),
         }
     }
 
@@ -175,6 +179,10 @@ impl GatewayRateLimiter {
 
     fn allow_webhook(&self, key: &str) -> bool {
         self.webhook.allow(key)
+    }
+
+    fn allow_alerts(&self, key: &str) -> bool {
+        self.alerts.allow(key)
     }
 }
 
@@ -1553,13 +1561,35 @@ async fn handle_alerts_webhook(
 ) -> impl IntoResponse {
     let rate_key =
         client_key_from_request(Some(peer_addr), &headers, state.trust_forwarded_headers);
-    if !state.rate_limiter.allow_webhook(&rate_key) {
+    if !state.rate_limiter.allow_alerts(&rate_key) {
         tracing::warn!("/webhooks/{source} rate limit exceeded");
         let err = serde_json::json!({
             "error": "Too many webhook requests. Please retry later.",
             "retry_after": RATE_LIMIT_WINDOW_SECS,
         });
         return (StatusCode::TOO_MANY_REQUESTS, Json(err));
+    }
+
+    // ── X-Webhook-Secret auth (optional, same mechanism as POST /webhook) ──
+    // Set channels_config.webhook.secret and configure the same value in your
+    // Vercel/Supabase/Upstash webhook settings as the custom header value.
+    if let Some(ref secret_hash) = state.webhook_secret_hash {
+        let header_hash = headers
+            .get("X-Webhook-Secret")
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(hash_webhook_secret);
+        match header_hash {
+            Some(val) if constant_time_eq(&val, secret_hash.as_ref()) => {}
+            _ => {
+                tracing::warn!(
+                    "/webhooks/{source}: rejected — invalid or missing X-Webhook-Secret (client={rate_key})"
+                );
+                let err = serde_json::json!({"error": "Unauthorized — invalid or missing X-Webhook-Secret header"});
+                return (StatusCode::UNAUTHORIZED, Json(err));
+            }
+        }
     }
 
     let Some(ref alerts_url) = state.alerts_incoming_webhook_url else {
@@ -1572,7 +1602,9 @@ async fn handle_alerts_webhook(
     let payload: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => {
-            tracing::warn!("Alert webhook JSON parse error (source={source}): {e}");
+            tracing::warn!(
+                "Alert webhook JSON parse error (source={source}, client={rate_key}): {e}"
+            );
             let err = serde_json::json!({"error": "Invalid JSON body"});
             return (StatusCode::BAD_REQUEST, Json(err));
         }
@@ -1584,10 +1616,10 @@ async fn handle_alerts_webhook(
         "upstash" => crate::alert_forwarder::transform_upstash(&payload),
         "custom" => crate::alert_forwarder::transform_custom(&payload),
         other => {
-            tracing::warn!("Unknown alert source: {other}");
-            let err = serde_json::json!({
-                "error": format!("Unknown source: {other}. Supported: vercel, supabase, upstash, custom")
-            });
+            // Truncate to prevent oversized log entries from attacker-controlled input.
+            let safe_source: String = other.chars().take(64).collect();
+            tracing::warn!("Unknown alert source: {safe_source} (client={rate_key})");
+            let err = serde_json::json!({"error": "Unknown source. Supported: vercel, supabase, upstash, custom"});
             return (StatusCode::BAD_REQUEST, Json(err));
         }
     };
@@ -1599,10 +1631,10 @@ async fn handle_alerts_webhook(
             (StatusCode::OK, Json(body))
         }
         Err(e) => {
+            // Log full error internally; return a generic message to avoid leaking
+            // internal topology (Mattermost URL, response body) to external callers.
             tracing::error!("Failed to forward {source} alert to Mattermost: {e:#}");
-            let err = serde_json::json!({
-                "error": format!("Failed to forward to Mattermost: {e}")
-            });
+            let err = serde_json::json!({"error": "Internal forwarding error"});
             (StatusCode::BAD_GATEWAY, Json(err))
         }
     }
