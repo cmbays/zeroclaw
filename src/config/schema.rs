@@ -2930,6 +2930,13 @@ pub struct MattermostConfig {
     /// `[secrets] encrypt = true` is set in config.
     #[serde(default)]
     pub admin_token: Option<String>,
+    /// Mattermost incoming webhook URL for posting external service alerts.
+    /// Create one in Mattermost → Integrations → Incoming Webhooks and paste the URL here.
+    /// When set, the gateway exposes `POST /webhooks/{vercel,supabase,upstash,custom}` endpoints
+    /// that transform payloads and forward them to this URL.
+    /// Backward-compat: omitting this field disables the alert endpoints (returns 501).
+    #[serde(default)]
+    pub alerts_incoming_webhook_url: Option<String>,
 }
 
 impl ChannelConfig for MattermostConfig {

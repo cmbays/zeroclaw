@@ -28,7 +28,7 @@ use crate::util::truncate_with_ellipsis;
 use anyhow::{Context, Result};
 use axum::{
     body::Bytes,
-    extract::{ConnectInfo, Query, State},
+    extract::{ConnectInfo, Path, Query, State},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Json},
     routing::{delete, get, post, put},
@@ -302,6 +302,8 @@ pub struct AppState {
     /// Nextcloud Talk webhook secret for signature verification
     pub nextcloud_talk_webhook_secret: Option<Arc<str>>,
     pub wati: Option<Arc<WatiChannel>>,
+    /// Mattermost incoming webhook URL for forwarding external alert payloads.
+    pub alerts_incoming_webhook_url: Option<Arc<str>>,
     /// Observability backend for metrics scraping
     pub observer: Arc<dyn crate::observability::Observer>,
     /// Registered tool specs (for web dashboard tools page)
@@ -590,6 +592,18 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
     if nextcloud_talk_channel.is_some() {
         println!("  POST /nextcloud-talk — Nextcloud Talk bot webhook");
     }
+    if config
+        .channels_config
+        .mattermost
+        .as_ref()
+        .and_then(|mm| mm.alerts_incoming_webhook_url.as_deref())
+        .is_some()
+    {
+        println!("  POST /webhooks/vercel    — Vercel deployment alert → Mattermost");
+        println!("  POST /webhooks/supabase  — Supabase alert → Mattermost");
+        println!("  POST /webhooks/upstash   — Upstash alert → Mattermost");
+        println!("  POST /webhooks/custom    — Custom JSON alert → Mattermost");
+    }
     println!("  GET  /api/*     — REST API (bearer token required)");
     println!("  GET  /ws/chat   — WebSocket agent chat");
     println!("  GET  /health    — health check");
@@ -641,6 +655,13 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         nextcloud_talk: nextcloud_talk_channel,
         nextcloud_talk_webhook_secret,
         wati: wati_channel,
+        alerts_incoming_webhook_url: config
+            .channels_config
+            .mattermost
+            .as_ref()
+            .and_then(|mm| mm.alerts_incoming_webhook_url.as_deref())
+            .filter(|url| !url.trim().is_empty())
+            .map(Arc::from),
         observer: broadcast_observer,
         tools_registry,
         cost_tracker,
@@ -665,6 +686,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         .route("/wati", get(handle_wati_verify))
         .route("/wati", post(handle_wati_webhook))
         .route("/nextcloud-talk", post(handle_nextcloud_talk_webhook))
+        .route("/webhooks/{source}", post(handle_alerts_webhook))
         // ── Web Dashboard API routes ──
         .route("/api/status", get(api::handle_api_status))
         .route("/api/config", get(api::handle_api_config_get))
@@ -1518,6 +1540,74 @@ async fn handle_nextcloud_talk_webhook(
     (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
 }
 
+/// POST /webhooks/{source} — transform external service alert payloads and forward to Mattermost.
+///
+/// Supported sources: `vercel`, `supabase`, `upstash`, `custom`.
+/// Requires `channels_config.mattermost.alerts_incoming_webhook_url` in config.
+async fn handle_alerts_webhook(
+    State(state): State<AppState>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    Path(source): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    let rate_key =
+        client_key_from_request(Some(peer_addr), &headers, state.trust_forwarded_headers);
+    if !state.rate_limiter.allow_webhook(&rate_key) {
+        tracing::warn!("/webhooks/{source} rate limit exceeded");
+        let err = serde_json::json!({
+            "error": "Too many webhook requests. Please retry later.",
+            "retry_after": RATE_LIMIT_WINDOW_SECS,
+        });
+        return (StatusCode::TOO_MANY_REQUESTS, Json(err));
+    }
+
+    let Some(ref alerts_url) = state.alerts_incoming_webhook_url else {
+        let err = serde_json::json!({
+            "error": "alerts_incoming_webhook_url not configured — set channels_config.mattermost.alerts_incoming_webhook_url"
+        });
+        return (StatusCode::NOT_IMPLEMENTED, Json(err));
+    };
+
+    let payload: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("Alert webhook JSON parse error (source={source}): {e}");
+            let err = serde_json::json!({"error": "Invalid JSON body"});
+            return (StatusCode::BAD_REQUEST, Json(err));
+        }
+    };
+
+    let text = match source.as_str() {
+        "vercel" => crate::alert_forwarder::transform_vercel(&payload),
+        "supabase" => crate::alert_forwarder::transform_supabase(&payload),
+        "upstash" => crate::alert_forwarder::transform_upstash(&payload),
+        "custom" => crate::alert_forwarder::transform_custom(&payload),
+        other => {
+            tracing::warn!("Unknown alert source: {other}");
+            let err = serde_json::json!({
+                "error": format!("Unknown source: {other}. Supported: vercel, supabase, upstash, custom")
+            });
+            return (StatusCode::BAD_REQUEST, Json(err));
+        }
+    };
+
+    tracing::info!("Forwarding {source} alert to Mattermost incoming webhook");
+    match crate::alert_forwarder::forward_to_mattermost(alerts_url, &text).await {
+        Ok(()) => {
+            let body = serde_json::json!({"status": "ok", "source": source, "forwarded": true});
+            (StatusCode::OK, Json(body))
+        }
+        Err(e) => {
+            tracing::error!("Failed to forward {source} alert to Mattermost: {e:#}");
+            let err = serde_json::json!({
+                "error": format!("Failed to forward to Mattermost: {e}")
+            });
+            (StatusCode::BAD_GATEWAY, Json(err))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1599,6 +1689,7 @@ mod tests {
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
             cost_tracker: None,
+            alerts_incoming_webhook_url: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
         };
 
@@ -1648,6 +1739,7 @@ mod tests {
             observer,
             tools_registry: Arc::new(Vec::new()),
             cost_tracker: None,
+            alerts_incoming_webhook_url: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
         };
 
@@ -2014,6 +2106,7 @@ mod tests {
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
             cost_tracker: None,
+            alerts_incoming_webhook_url: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
         };
 
@@ -2078,6 +2171,7 @@ mod tests {
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
             cost_tracker: None,
+            alerts_incoming_webhook_url: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
         };
 
@@ -2154,6 +2248,7 @@ mod tests {
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
             cost_tracker: None,
+            alerts_incoming_webhook_url: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
         };
 
@@ -2202,6 +2297,7 @@ mod tests {
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
             cost_tracker: None,
+            alerts_incoming_webhook_url: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
         };
 
@@ -2255,6 +2351,7 @@ mod tests {
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
             cost_tracker: None,
+            alerts_incoming_webhook_url: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
         };
 
@@ -2313,6 +2410,7 @@ mod tests {
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
             cost_tracker: None,
+            alerts_incoming_webhook_url: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
         };
 
@@ -2367,6 +2465,7 @@ mod tests {
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
             cost_tracker: None,
+            alerts_incoming_webhook_url: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
         };
 

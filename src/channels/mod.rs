@@ -6229,6 +6229,8 @@ This is an example JSON object for profile settings."#;
             mention_only: Some(false),
             thread_ttl_minutes: None,
             sync_profile: None,
+            admin_token: None,
+            alerts_incoming_webhook_url: None,
         });
 
         let channels = collect_configured_channels(&config, "test");
