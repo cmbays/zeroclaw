@@ -28,7 +28,7 @@ use crate::util::truncate_with_ellipsis;
 use anyhow::{Context, Result};
 use axum::{
     body::Bytes,
-    extract::{ConnectInfo, Query, State},
+    extract::{ConnectInfo, Path, Query, State},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Json},
     routing::{delete, get, post, put},
@@ -158,6 +158,9 @@ impl SlidingWindowRateLimiter {
 pub struct GatewayRateLimiter {
     pair: SlidingWindowRateLimiter,
     webhook: SlidingWindowRateLimiter,
+    /// Separate bucket for alert-forwarding endpoints so alert floods cannot
+    /// starve the main `/webhook` agent endpoint.
+    alerts: SlidingWindowRateLimiter,
 }
 
 impl GatewayRateLimiter {
@@ -166,6 +169,7 @@ impl GatewayRateLimiter {
         Self {
             pair: SlidingWindowRateLimiter::new(pair_per_minute, window, max_keys),
             webhook: SlidingWindowRateLimiter::new(webhook_per_minute, window, max_keys),
+            alerts: SlidingWindowRateLimiter::new(webhook_per_minute, window, max_keys),
         }
     }
 
@@ -175,6 +179,10 @@ impl GatewayRateLimiter {
 
     fn allow_webhook(&self, key: &str) -> bool {
         self.webhook.allow(key)
+    }
+
+    fn allow_alerts(&self, key: &str) -> bool {
+        self.alerts.allow(key)
     }
 }
 
@@ -302,6 +310,8 @@ pub struct AppState {
     /// Nextcloud Talk webhook secret for signature verification
     pub nextcloud_talk_webhook_secret: Option<Arc<str>>,
     pub wati: Option<Arc<WatiChannel>>,
+    /// Mattermost incoming webhook URL for forwarding external alert payloads.
+    pub alerts_incoming_webhook_url: Option<Arc<str>>,
     /// Observability backend for metrics scraping
     pub observer: Arc<dyn crate::observability::Observer>,
     /// Registered tool specs (for web dashboard tools page)
@@ -590,6 +600,18 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
     if nextcloud_talk_channel.is_some() {
         println!("  POST /nextcloud-talk — Nextcloud Talk bot webhook");
     }
+    if config
+        .channels_config
+        .mattermost
+        .as_ref()
+        .and_then(|mm| mm.alerts_incoming_webhook_url.as_deref())
+        .is_some()
+    {
+        println!("  POST /webhooks/vercel    — Vercel deployment alert → Mattermost");
+        println!("  POST /webhooks/supabase  — Supabase alert → Mattermost");
+        println!("  POST /webhooks/upstash   — Upstash alert → Mattermost");
+        println!("  POST /webhooks/custom    — Custom JSON alert → Mattermost");
+    }
     println!("  GET  /api/*     — REST API (bearer token required)");
     println!("  GET  /ws/chat   — WebSocket agent chat");
     println!("  GET  /health    — health check");
@@ -641,6 +663,13 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         nextcloud_talk: nextcloud_talk_channel,
         nextcloud_talk_webhook_secret,
         wati: wati_channel,
+        alerts_incoming_webhook_url: config
+            .channels_config
+            .mattermost
+            .as_ref()
+            .and_then(|mm| mm.alerts_incoming_webhook_url.as_deref())
+            .filter(|url| !url.trim().is_empty())
+            .map(Arc::from),
         observer: broadcast_observer,
         tools_registry,
         cost_tracker,
@@ -665,6 +694,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         .route("/wati", get(handle_wati_verify))
         .route("/wati", post(handle_wati_webhook))
         .route("/nextcloud-talk", post(handle_nextcloud_talk_webhook))
+        .route("/webhooks/{source}", post(handle_alerts_webhook))
         // ── Web Dashboard API routes ──
         .route("/api/status", get(api::handle_api_status))
         .route("/api/config", get(api::handle_api_config_get))
@@ -1518,6 +1548,98 @@ async fn handle_nextcloud_talk_webhook(
     (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
 }
 
+/// POST /webhooks/{source} — transform external service alert payloads and forward to Mattermost.
+///
+/// Supported sources: `vercel`, `supabase`, `upstash`, `custom`.
+/// Requires `channels_config.mattermost.alerts_incoming_webhook_url` in config.
+async fn handle_alerts_webhook(
+    State(state): State<AppState>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    Path(source): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    let rate_key =
+        client_key_from_request(Some(peer_addr), &headers, state.trust_forwarded_headers);
+    if !state.rate_limiter.allow_alerts(&rate_key) {
+        tracing::warn!("/webhooks/{source} rate limit exceeded");
+        let err = serde_json::json!({
+            "error": "Too many webhook requests. Please retry later.",
+            "retry_after": RATE_LIMIT_WINDOW_SECS,
+        });
+        return (StatusCode::TOO_MANY_REQUESTS, Json(err));
+    }
+
+    // ── X-Webhook-Secret auth (optional, same mechanism as POST /webhook) ──
+    // Set channels_config.webhook.secret and configure the same value in your
+    // Vercel/Supabase/Upstash webhook settings as the custom header value.
+    if let Some(ref secret_hash) = state.webhook_secret_hash {
+        let header_hash = headers
+            .get("X-Webhook-Secret")
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(hash_webhook_secret);
+        match header_hash {
+            Some(val) if constant_time_eq(&val, secret_hash.as_ref()) => {}
+            _ => {
+                tracing::warn!(
+                    "/webhooks/{source}: rejected — invalid or missing X-Webhook-Secret (client={rate_key})"
+                );
+                let err = serde_json::json!({"error": "Unauthorized — invalid or missing X-Webhook-Secret header"});
+                return (StatusCode::UNAUTHORIZED, Json(err));
+            }
+        }
+    }
+
+    let Some(ref alerts_url) = state.alerts_incoming_webhook_url else {
+        let err = serde_json::json!({
+            "error": "alerts_incoming_webhook_url not configured — set channels_config.mattermost.alerts_incoming_webhook_url"
+        });
+        return (StatusCode::NOT_IMPLEMENTED, Json(err));
+    };
+
+    let payload: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                "Alert webhook JSON parse error (source={source}, client={rate_key}): {e}"
+            );
+            let err = serde_json::json!({"error": "Invalid JSON body"});
+            return (StatusCode::BAD_REQUEST, Json(err));
+        }
+    };
+
+    let text = match source.as_str() {
+        "vercel" => crate::alert_forwarder::transform_vercel(&payload),
+        "supabase" => crate::alert_forwarder::transform_supabase(&payload),
+        "upstash" => crate::alert_forwarder::transform_upstash(&payload),
+        "custom" => crate::alert_forwarder::transform_custom(&payload),
+        other => {
+            // Truncate to prevent oversized log entries from attacker-controlled input.
+            let safe_source: String = other.chars().take(64).collect();
+            tracing::warn!("Unknown alert source: {safe_source} (client={rate_key})");
+            let err = serde_json::json!({"error": "Unknown source. Supported: vercel, supabase, upstash, custom"});
+            return (StatusCode::BAD_REQUEST, Json(err));
+        }
+    };
+
+    tracing::info!("Forwarding {source} alert to Mattermost incoming webhook");
+    match crate::alert_forwarder::forward_to_mattermost(alerts_url, &text).await {
+        Ok(()) => {
+            let body = serde_json::json!({"status": "ok", "source": source, "forwarded": true});
+            (StatusCode::OK, Json(body))
+        }
+        Err(e) => {
+            // Log full error internally; return a generic message to avoid leaking
+            // internal topology (Mattermost URL, response body) to external callers.
+            tracing::error!("Failed to forward {source} alert to Mattermost: {e:#}");
+            let err = serde_json::json!({"error": "Internal forwarding error"});
+            (StatusCode::BAD_GATEWAY, Json(err))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1599,6 +1721,7 @@ mod tests {
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
             cost_tracker: None,
+            alerts_incoming_webhook_url: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
         };
 
@@ -1648,6 +1771,7 @@ mod tests {
             observer,
             tools_registry: Arc::new(Vec::new()),
             cost_tracker: None,
+            alerts_incoming_webhook_url: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
         };
 
@@ -2014,6 +2138,7 @@ mod tests {
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
             cost_tracker: None,
+            alerts_incoming_webhook_url: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
         };
 
@@ -2078,6 +2203,7 @@ mod tests {
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
             cost_tracker: None,
+            alerts_incoming_webhook_url: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
         };
 
@@ -2154,6 +2280,7 @@ mod tests {
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
             cost_tracker: None,
+            alerts_incoming_webhook_url: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
         };
 
@@ -2202,6 +2329,7 @@ mod tests {
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
             cost_tracker: None,
+            alerts_incoming_webhook_url: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
         };
 
@@ -2255,6 +2383,7 @@ mod tests {
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
             cost_tracker: None,
+            alerts_incoming_webhook_url: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
         };
 
@@ -2313,6 +2442,7 @@ mod tests {
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
             cost_tracker: None,
+            alerts_incoming_webhook_url: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
         };
 
@@ -2367,6 +2497,7 @@ mod tests {
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
             cost_tracker: None,
+            alerts_incoming_webhook_url: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
         };
 
@@ -2773,5 +2904,269 @@ mod tests {
 
         // Should be allowed again
         assert!(limiter.allow("burst-ip"));
+    }
+
+    // ── Alert-webhook integration tests ────────────────────────────────────
+    //
+    // These tests call `handle_alerts_webhook` directly (private handler, same
+    // module), using a wiremock MockServer to intercept outbound Mattermost
+    // POSTs so no real network service is required.
+
+    fn alerts_state(alerts_url: Option<String>) -> AppState {
+        AppState {
+            config: Arc::new(Mutex::new(Config::default())),
+            provider: Arc::new(MockProvider::default()),
+            model: "test-model".into(),
+            temperature: 0.0,
+            mem: Arc::new(MockMemory),
+            auto_save: false,
+            webhook_secret_hash: None,
+            pairing: Arc::new(PairingGuard::new(false, &[])),
+            trust_forwarded_headers: false,
+            rate_limiter: Arc::new(GatewayRateLimiter::new(100, 100, 100)),
+            idempotency_store: Arc::new(IdempotencyStore::new(Duration::from_secs(300), 1000)),
+            whatsapp: None,
+            whatsapp_app_secret: None,
+            linq: None,
+            linq_signing_secret: None,
+            nextcloud_talk: None,
+            nextcloud_talk_webhook_secret: None,
+            wati: None,
+            observer: Arc::new(crate::observability::NoopObserver),
+            tools_registry: Arc::new(Vec::new()),
+            cost_tracker: None,
+            alerts_incoming_webhook_url: alerts_url.map(|s| Arc::from(s.as_str())),
+            event_tx: tokio::sync::broadcast::channel(16).0,
+        }
+    }
+
+    #[tokio::test]
+    async fn alerts_webhook_returns_not_implemented_when_url_unconfigured() {
+        let state = alerts_state(None);
+        let response = handle_alerts_webhook(
+            State(state),
+            test_connect_info(),
+            Path("vercel".to_string()),
+            HeaderMap::new(),
+            Bytes::from(r#"{"type":"deployment.succeeded"}"#),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    }
+
+    #[tokio::test]
+    async fn alerts_webhook_rejects_invalid_json_body() {
+        let state = alerts_state(Some(
+            "https://mattermost.zeroclaw.example/hooks/abc".to_string(),
+        ));
+        let response = handle_alerts_webhook(
+            State(state),
+            test_connect_info(),
+            Path("vercel".to_string()),
+            HeaderMap::new(),
+            Bytes::from(&b"not json"[..]),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn alerts_webhook_rejects_unknown_source() {
+        let state = alerts_state(Some(
+            "https://mattermost.zeroclaw.example/hooks/abc".to_string(),
+        ));
+        let response = handle_alerts_webhook(
+            State(state),
+            test_connect_info(),
+            Path("unknownsvc".to_string()),
+            HeaderMap::new(),
+            Bytes::from(r#"{}"#),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("Unknown source"),
+            "expected 'Unknown source' in error, got: {json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn alerts_webhook_rejects_missing_secret_when_configured() {
+        let secret = generate_test_secret();
+        let mut state = alerts_state(Some(
+            "https://mattermost.zeroclaw.example/hooks/abc".to_string(),
+        ));
+        state.webhook_secret_hash = Some(Arc::from(hash_webhook_secret(&secret)));
+
+        let response = handle_alerts_webhook(
+            State(state),
+            test_connect_info(),
+            Path("vercel".to_string()),
+            HeaderMap::new(),
+            Bytes::from(r#"{"type":"deployment.succeeded"}"#),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn alerts_webhook_rejects_wrong_secret() {
+        let correct = generate_test_secret();
+        let wrong = generate_test_secret();
+        let mut state = alerts_state(Some(
+            "https://mattermost.zeroclaw.example/hooks/abc".to_string(),
+        ));
+        state.webhook_secret_hash = Some(Arc::from(hash_webhook_secret(&correct)));
+
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Webhook-Secret", HeaderValue::from_str(&wrong).unwrap());
+        let response = handle_alerts_webhook(
+            State(state),
+            test_connect_info(),
+            Path("vercel".to_string()),
+            headers,
+            Bytes::from(r#"{"type":"deployment.succeeded"}"#),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn alerts_webhook_forwards_vercel_payload_and_returns_ok() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/hooks/zeroclaw-test"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let url = format!("{}/hooks/zeroclaw-test", mock.uri());
+        let state = alerts_state(Some(url));
+
+        let payload = serde_json::json!({
+            "type": "deployment.succeeded",
+            "payload": {
+                "project": {"name": "zeroclaw-dashboard"},
+                "deployment": {
+                    "url": "zeroclaw-abc.vercel.app",
+                    "meta": {"githubCommitMessage": "feat: add alert webhook"}
+                },
+                "links": {"deployment": "https://vercel.com/team/zeroclaw/abc"}
+            }
+        })
+        .to_string();
+
+        let response = handle_alerts_webhook(
+            State(state),
+            test_connect_info(),
+            Path("vercel".to_string()),
+            HeaderMap::new(),
+            Bytes::from(payload),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "ok");
+        assert_eq!(json["source"], "vercel");
+        assert_eq!(json["forwarded"], true);
+        // wiremock verifies exactly 1 POST was received when mock is dropped
+    }
+
+    #[tokio::test]
+    async fn alerts_webhook_forwards_custom_payload_and_returns_ok() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let state = alerts_state(Some(mock.uri().to_string()));
+        let response = handle_alerts_webhook(
+            State(state),
+            test_connect_info(),
+            Path("custom".to_string()),
+            HeaderMap::new(),
+            Bytes::from(r#"{"event":"deploy","status":"ok"}"#),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn alerts_webhook_returns_502_when_mattermost_unreachable() {
+        // Port 19999 is intentionally not bound; the connection attempt fails fast.
+        let state = alerts_state(Some(
+            "http://127.0.0.1:19999/hooks/zeroclaw-dead".to_string(),
+        ));
+        let response = handle_alerts_webhook(
+            State(state),
+            test_connect_info(),
+            Path("vercel".to_string()),
+            HeaderMap::new(),
+            Bytes::from(r#"{"type":"deployment.succeeded","payload":{}}"#),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            json["error"], "Internal forwarding error",
+            "502 body must not leak internal error details"
+        );
+    }
+
+    #[tokio::test]
+    async fn alerts_webhook_accepts_valid_secret_and_forwards() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let secret = generate_test_secret();
+        let mut state = alerts_state(Some(mock.uri().to_string()));
+        state.webhook_secret_hash = Some(Arc::from(hash_webhook_secret(&secret)));
+
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Webhook-Secret", HeaderValue::from_str(&secret).unwrap());
+        let response = handle_alerts_webhook(
+            State(state),
+            test_connect_info(),
+            Path("supabase".to_string()),
+            headers,
+            Bytes::from(
+                r#"{"alert_name":"HighCPU","project_ref":"zeroclaw-proj","message":"CPU at 95%"}"#,
+            ),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }

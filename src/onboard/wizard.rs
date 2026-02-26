@@ -7173,6 +7173,8 @@ mod tests {
             mention_only: Some(false),
             thread_ttl_minutes: None,
             sync_profile: None,
+            admin_token: None,
+            alerts_incoming_webhook_url: None,
         });
         assert!(has_launchable_channels(&channels));
 

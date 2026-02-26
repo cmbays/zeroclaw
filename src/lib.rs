@@ -39,6 +39,7 @@ use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 
 pub mod agent;
+pub(crate) mod alert_forwarder;
 pub(crate) mod approval;
 pub(crate) mod auth;
 pub mod channels;
