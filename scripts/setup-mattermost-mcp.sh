@@ -19,10 +19,9 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MCP_DIR="${HOME}/Github/mattermost-mcp"
 CONFIG_OUT="${MCP_DIR}/config.local.json"
-TEAM_NAME="${1:-}"
-shift 2>/dev/null || true
+TEAM_NAME=""
 
-# Parse --team-name flag
+# Parse flags
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --team-name) TEAM_NAME="$2"; shift 2 ;;
@@ -38,7 +37,7 @@ if [[ -f "$ENVRC_FILE" ]]; then
 fi
 
 MM_SITE_URL="${MM_SITE_URL:-http://localhost:8065}"
-TEAM_NAME="${TEAM_NAME:-${MM_TEAM_NAME:-zeroclaw}}"
+TEAM_NAME="${TEAM_NAME:-${MM_TEAM_NAME:-zeroclaw-hq}}"
 
 if [[ -n "${MM_CLAUDE_TOKEN:-}" ]]; then
   API_TOKEN="$MM_CLAUDE_TOKEN"
