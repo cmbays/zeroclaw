@@ -104,13 +104,13 @@ npm install && npm run build
 # 4. Add to ~/.claude/settings.json (see below), then restart Claude Code
 ```
 
-**`~/.claude/settings.json` entry** (add under `"mcpServers"`):
+**`~/.claude/settings.json` entry** (add under `"mcpServers"`, substitute your actual path):
 
 ```json
 "mcpServers": {
   "mattermost": {
     "command": "node",
-    "args": ["/Users/cmbays/Github/mattermost-mcp/build/index.js"]
+    "args": ["<absolute-path-to>/mattermost-mcp/build/index.js"]
   }
 }
 ```
