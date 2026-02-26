@@ -1592,10 +1592,26 @@ async fn handle_alerts_webhook(
         }
     }
 
+    // ── Bearer token auth (pairing) — same gate as POST /webhook ──────────────
+    if state.pairing.require_pairing() {
+        let auth = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let token = auth.strip_prefix("Bearer ").unwrap_or("");
+        if !state.pairing.is_authenticated(token) {
+            tracing::warn!(
+                "/webhooks/{source}: rejected — not paired / invalid bearer token (client={rate_key})"
+            );
+            let err = serde_json::json!({
+                "error": "Unauthorized — pair first via POST /pair, then send Authorization: Bearer <token>"
+            });
+            return (StatusCode::UNAUTHORIZED, Json(err));
+        }
+    }
+
     let Some(ref alerts_url) = state.alerts_incoming_webhook_url else {
-        let err = serde_json::json!({
-            "error": "alerts_incoming_webhook_url not configured — set channels_config.mattermost.alerts_incoming_webhook_url"
-        });
+        let err = serde_json::json!({"error": "Alert forwarding not enabled on this server"});
         return (StatusCode::NOT_IMPLEMENTED, Json(err));
     };
 

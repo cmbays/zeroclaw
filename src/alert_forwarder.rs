@@ -11,10 +11,12 @@ use std::time::Duration;
 
 /// Shared HTTP client for forwarding to Mattermost.
 /// Reusing the client enables TCP/TLS connection pooling.
+/// Redirects are disabled: a POST should land exactly where configured.
 static MATTERMOST_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .connect_timeout(Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .expect("failed to build Mattermost HTTP client")
 });
@@ -42,8 +44,15 @@ fn sanitize_field(input: &str, max_len: usize) -> String {
 ///
 /// - Bare hostnames (no `://`) get `https://` prepended (Vercel sends bare hostnames).
 /// - `http://` and `https://` URLs pass through unchanged.
+/// - Any URL containing control characters (newlines, CR, NUL) is rejected to prevent
+///   markdown line-injection attacks.
 /// - Any other scheme (e.g. `javascript:`, `ftp://`) is rejected — returns `None`.
 fn safe_http_url(url: &str) -> Option<String> {
+    // Reject control characters — newlines break markdown formatting and enable injection.
+    if url.chars().any(|c| c.is_control()) {
+        tracing::warn!("Rejecting URL with control characters from webhook payload");
+        return None;
+    }
     if url.starts_with("https://") || url.starts_with("http://") {
         Some(url.to_owned())
     } else if !url.contains(':') {
@@ -56,9 +65,26 @@ fn safe_http_url(url: &str) -> Option<String> {
     }
 }
 
+/// Truncate a string to at most `max_bytes` bytes, always on a valid UTF-8 char boundary.
+///
+/// Using a raw byte-index slice on a multi-byte string panics if the index falls inside a
+/// multi-byte code point. This helper walks backwards from `max_bytes` to find the nearest
+/// safe boundary, preventing a remotely-triggerable panic.
+fn truncate_bytes(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 /// Transform a Vercel deployment webhook payload into a Mattermost message.
 pub fn transform_vercel(body: &serde_json::Value) -> String {
-    let event_type = body["type"].as_str().unwrap_or("unknown");
+    // Sanitize before matching so the catch-all `other` arm is already clean.
+    let event_type = sanitize_field(body["type"].as_str().unwrap_or("unknown"), 64);
     let project_raw = body["payload"]["project"]["name"]
         .as_str()
         .or_else(|| body["payload"]["deployment"]["name"].as_str())
@@ -78,7 +104,7 @@ pub fn transform_vercel(body: &serde_json::Value) -> String {
         .unwrap_or("");
     let commit_msg = sanitize_field(commit_raw, 256);
 
-    let (icon, status) = match event_type {
+    let (icon, status) = match event_type.as_str() {
         "deployment.succeeded" => (":white_check_mark:", "Deploy succeeded"),
         "deployment.failed" | "deployment.error" => (":x:", "Deploy failed"),
         "deployment.cancelled" => (":warning:", "Deploy cancelled"),
@@ -147,7 +173,8 @@ pub fn transform_supabase(body: &serde_json::Value) -> String {
 
 /// Transform an Upstash webhook payload into a Mattermost message.
 pub fn transform_upstash(body: &serde_json::Value) -> String {
-    let event = body["event"].as_str().unwrap_or("event");
+    // Sanitize before matching so the catch-all `other` arm is already clean.
+    let event = sanitize_field(body["event"].as_str().unwrap_or("event"), 64);
     let resource_raw = body["database_id"]
         .as_str()
         .or_else(|| body["queue_name"].as_str())
@@ -157,7 +184,7 @@ pub fn transform_upstash(body: &serde_json::Value) -> String {
         });
     let resource = sanitize_field(resource_raw, 64);
 
-    let (icon, label) = match event {
+    let (icon, label) = match event.as_str() {
         "rate_limit_exceeded" => (":warning:", "Rate limit exceeded"),
         "circuit_breaker_open" => (":red_circle:", "Circuit breaker opened"),
         "circuit_breaker_close" => (":large_green_circle:", "Circuit breaker closed"),
@@ -203,10 +230,14 @@ pub fn transform_custom(body: &serde_json::Value) -> String {
             pretty.len(),
             CODE_BLOCK_MAX
         );
-        format!("{}...(truncated)", &pretty[..CODE_BLOCK_MAX])
+        format!("{}...(truncated)", truncate_bytes(&pretty, CODE_BLOCK_MAX))
     } else {
         pretty
     };
+
+    // Escape triple-backtick sequences so attacker-controlled values cannot break out of
+    // the fenced code block and inject arbitrary Mattermost markdown.
+    let body_text = body_text.replace("```", "\\`\\`\\`");
 
     format!(":incoming_envelope: **Custom webhook**\n```json\n{body_text}\n```")
 }
@@ -218,11 +249,11 @@ pub fn transform_custom(body: &serde_json::Value) -> String {
 pub async fn forward_to_mattermost(url: &str, text: &str) -> Result<()> {
     let text = if text.len() > MATTERMOST_MAX_TEXT_LEN {
         tracing::warn!(
-            "Alert message is {} chars; truncating to {} for Mattermost",
+            "Alert message is {} bytes; truncating to {} for Mattermost",
             text.len(),
             MATTERMOST_MAX_TEXT_LEN
         );
-        &text[..MATTERMOST_MAX_TEXT_LEN]
+        truncate_bytes(text, MATTERMOST_MAX_TEXT_LEN)
     } else {
         text
     };
