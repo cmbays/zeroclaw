@@ -236,6 +236,29 @@ impl AgentBuilder {
     }
 }
 
+/// Filter a tool registry to only the named tools in `allowlist`.
+///
+/// When `allowlist` is empty every tool is kept unchanged, preserving the
+/// default "all tools available" behaviour. Unknown names in the allowlist are
+/// silently ignored (the tool simply won't be registered).
+fn apply_tool_allowlist(tools: Vec<Box<dyn Tool>>, allowlist: &[String]) -> Vec<Box<dyn Tool>> {
+    if allowlist.is_empty() {
+        return tools;
+    }
+    let before = tools.len();
+    let filtered: Vec<Box<dyn Tool>> = tools
+        .into_iter()
+        .filter(|t| allowlist.contains(&t.name().to_owned()))
+        .collect();
+    tracing::debug!(
+        before,
+        after = filtered.len(),
+        allowed = ?allowlist,
+        "tool_allowlist applied"
+    );
+    filtered
+}
+
 impl Agent {
     pub fn builder() -> AgentBuilder {
         AgentBuilder::new()
@@ -295,23 +318,7 @@ impl Agent {
         );
 
         // Apply tool_allowlist: if non-empty, restrict tools exposed to the model.
-        let tools = if config.tool_allowlist.is_empty() {
-            tools
-        } else {
-            let allowlist = &config.tool_allowlist;
-            let before = tools.len();
-            let filtered: Vec<Box<dyn Tool>> = tools
-                .into_iter()
-                .filter(|t| allowlist.contains(&t.name().to_owned()))
-                .collect();
-            tracing::debug!(
-                before,
-                after = filtered.len(),
-                allowed = ?allowlist,
-                "tool_allowlist applied"
-            );
-            filtered
-        };
+        let tools = apply_tool_allowlist(tools, &config.tool_allowlist);
 
         let provider_name = config.default_provider.as_deref().unwrap_or("openrouter");
 
@@ -921,5 +928,86 @@ mod tests {
         assert_eq!(response, "classified");
         let seen = seen_models.lock();
         assert_eq!(seen.as_slice(), &["hint:fast".to_string()]);
+    }
+
+    // ── apply_tool_allowlist ─────────────────────────────────────────────────
+
+    fn named_mock_tool(name: &'static str) -> Box<dyn Tool> {
+        struct NamedMock(&'static str);
+
+        #[async_trait::async_trait]
+        impl Tool for NamedMock {
+            fn name(&self) -> &str {
+                self.0
+            }
+            fn description(&self) -> &str {
+                "mock"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object", "properties": {}})
+            }
+            async fn execute(
+                &self,
+                _args: serde_json::Value,
+            ) -> anyhow::Result<crate::tools::ToolResult> {
+                Ok(crate::tools::ToolResult {
+                    success: true,
+                    output: String::new(),
+                    error: None,
+                })
+            }
+        }
+
+        Box::new(NamedMock(name))
+    }
+
+    #[test]
+    fn apply_tool_allowlist_empty_allowlist_keeps_all() {
+        let tools: Vec<Box<dyn Tool>> = vec![
+            named_mock_tool("shell"),
+            named_mock_tool("file_read"),
+            named_mock_tool("linear"),
+        ];
+        let result = apply_tool_allowlist(tools, &[]);
+        assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn apply_tool_allowlist_filters_to_named_tools() {
+        let tools: Vec<Box<dyn Tool>> = vec![
+            named_mock_tool("shell"),
+            named_mock_tool("file_read"),
+            named_mock_tool("linear"),
+            named_mock_tool("memory_recall"),
+        ];
+        let allowlist = vec!["linear".to_string(), "memory_recall".to_string()];
+        let result = apply_tool_allowlist(tools, &allowlist);
+        assert_eq!(result.len(), 2);
+        let names: Vec<&str> = result.iter().map(|t| t.name()).collect();
+        assert!(names.contains(&"linear"));
+        assert!(names.contains(&"memory_recall"));
+        assert!(!names.contains(&"shell"));
+        assert!(!names.contains(&"file_read"));
+    }
+
+    #[test]
+    fn apply_tool_allowlist_unknown_name_yields_empty() {
+        let tools: Vec<Box<dyn Tool>> = vec![named_mock_tool("shell"), named_mock_tool("linear")];
+        let allowlist = vec!["nonexistent".to_string()];
+        let result = apply_tool_allowlist(tools, &allowlist);
+        assert_eq!(result.len(), 0);
+    }
+
+    #[test]
+    fn apply_tool_allowlist_preserves_order() {
+        let tools: Vec<Box<dyn Tool>> = vec![
+            named_mock_tool("c"),
+            named_mock_tool("a"),
+            named_mock_tool("b"),
+        ];
+        let allowlist = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let result = apply_tool_allowlist(tools, &allowlist);
+        let names: Vec<&str> = result.iter().map(|t| t.name()).collect();
+        assert_eq!(names, vec!["c", "a", "b"]);
     }
 }
