@@ -1591,7 +1591,8 @@ impl Tool for LinearTool {
                 },
                 {
                     "properties": { "operation": { "const": "update_issue" } },
-                    "required": ["operation", "issue_id"]
+                    "required": ["operation", "issue_id"],
+                    "description": "Requires issue_id plus at least one field to update: title, description, state_id, assignee_id, priority, label_ids, parent_id, cycle_id, estimate, due_date, or project_id"
                 },
                 {
                     "properties": { "operation": { "const": "get_issue" } },
