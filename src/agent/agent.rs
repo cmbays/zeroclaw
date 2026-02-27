@@ -268,6 +268,14 @@ impl Agent {
         &self.history
     }
 
+    /// Returns the number of tools registered on this agent.
+    ///
+    /// Useful in tests to assert that `tool_allowlist` filtering (or any
+    /// pre-builder filtering) produced the expected tool set.
+    pub fn tool_count(&self) -> usize {
+        self.tools.len()
+    }
+
     pub fn clear_history(&mut self) {
         self.history.clear();
     }
