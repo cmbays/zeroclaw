@@ -21,6 +21,7 @@ x-zeroclaw-bot: &zeroclaw-bot
   command: ["daemon"]
   environment:
     - RUST_LOG=zeroclaw=info
+    - ZEROCLAW_MODEL=qwen3:8b
   extra_hosts:
     - "host.docker.internal:host-gateway"
   networks:
