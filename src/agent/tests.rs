@@ -1336,3 +1336,46 @@ async fn run_single_delegates_to_turn() {
         "Expected non-empty response from run_single"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 26. Tool count / wiring invariants
+//
+// These tests assert the builder-wiring contract that `from_config()` relies
+// on: tools passed into the builder are exactly the tools the agent exposes.
+// This makes the `tool_allowlist` filtering path testable without requiring
+// real I/O (providers, filesystem) — the caller pre-filters and the builder
+// preserves that set verbatim.
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn agent_tool_count_matches_tools_passed_to_builder() {
+    let agent = build_agent_with(
+        Box::new(ScriptedProvider::new(vec![])),
+        vec![Box::new(EchoTool), Box::new(FailingTool)],
+        Box::new(NativeToolDispatcher),
+    );
+    assert_eq!(agent.tool_count(), 2);
+}
+
+#[test]
+fn agent_with_prefiltered_tools_exposes_only_that_subset() {
+    // Simulate the from_config() pattern: collect all tools, filter, then
+    // pass the filtered set to the builder.  If the builder ever stops
+    // propagating the tools vec, this assertion catches the regression.
+    let all_tools: Vec<Box<dyn Tool>> = vec![
+        Box::new(EchoTool),
+        Box::new(FailingTool),
+        Box::new(PanickingTool),
+    ];
+    let filtered: Vec<Box<dyn Tool>> = all_tools
+        .into_iter()
+        .filter(|t| t.name() == "echo")
+        .collect();
+
+    let agent = build_agent_with(
+        Box::new(ScriptedProvider::new(vec![])),
+        filtered,
+        Box::new(NativeToolDispatcher),
+    );
+    assert_eq!(agent.tool_count(), 1);
+}
