@@ -584,7 +584,7 @@ impl LinearTool {
 
     async fn list_states(&self, _args: &Value) -> anyhow::Result<ToolResult> {
         let query = r#"
-            query ListStates($teamId: ID!) {
+            query ListStates($teamId: String!) {
                 team(id: $teamId) {
                     states {
                         nodes {
@@ -645,7 +645,7 @@ impl LinearTool {
 
     async fn list_members(&self, _args: &Value) -> anyhow::Result<ToolResult> {
         let query = r#"
-            query ListMembers($teamId: ID!) {
+            query ListMembers($teamId: String!) {
                 team(id: $teamId) {
                     members {
                         nodes {
@@ -704,7 +704,7 @@ impl LinearTool {
 
     async fn list_labels(&self, _args: &Value) -> anyhow::Result<ToolResult> {
         let query = r#"
-            query ListLabels($teamId: ID!) {
+            query ListLabels($teamId: String!) {
                 team(id: $teamId) {
                     labels {
                         nodes {
@@ -1359,7 +1359,7 @@ impl LinearTool {
 
     async fn list_templates(&self, _args: &Value) -> anyhow::Result<ToolResult> {
         let query = r#"
-            query ListTemplates($teamId: ID!) {
+            query ListTemplates($teamId: String!) {
                 team(id: $teamId) {
                     templates {
                         nodes {
