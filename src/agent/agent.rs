@@ -294,6 +294,25 @@ impl Agent {
             config,
         );
 
+        // Apply tool_allowlist: if non-empty, restrict tools exposed to the model.
+        let tools = if config.tool_allowlist.is_empty() {
+            tools
+        } else {
+            let allowlist = &config.tool_allowlist;
+            let before = tools.len();
+            let filtered: Vec<Box<dyn Tool>> = tools
+                .into_iter()
+                .filter(|t| allowlist.contains(&t.name().to_owned()))
+                .collect();
+            tracing::debug!(
+                before,
+                after = filtered.len(),
+                allowed = ?allowlist,
+                "tool_allowlist applied"
+            );
+            filtered
+        };
+
         let provider_name = config.default_provider.as_deref().unwrap_or("openrouter");
 
         let model_name = config
