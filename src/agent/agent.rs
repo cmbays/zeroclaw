@@ -245,10 +245,11 @@ fn apply_tool_allowlist(tools: Vec<Box<dyn Tool>>, allowlist: &[String]) -> Vec<
     if allowlist.is_empty() {
         return tools;
     }
+    let allowed: std::collections::HashSet<&str> = allowlist.iter().map(|s| s.as_str()).collect();
     let before = tools.len();
     let filtered: Vec<Box<dyn Tool>> = tools
         .into_iter()
-        .filter(|t| allowlist.contains(&t.name().to_owned()))
+        .filter(|t| allowed.contains(t.name()))
         .collect();
     tracing::debug!(
         before,
