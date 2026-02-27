@@ -358,7 +358,7 @@ impl LinearTool {
                     comments(first: 20) {
                         nodes {
                             body
-                            author { name }
+                            user { name }
                             createdAt
                         }
                     }
@@ -405,7 +405,7 @@ impl LinearTool {
                         output,
                         "\n[{}] {}: {}",
                         c["createdAt"].as_str().unwrap_or(""),
-                        c["author"]["name"].as_str().unwrap_or("?"),
+                        c["user"]["name"].as_str().unwrap_or("?"),
                         c["body"].as_str().unwrap_or("")
                     );
                 }
@@ -1008,7 +1008,7 @@ impl LinearTool {
         let filter_arg = args["filter"].as_str().unwrap_or("all");
 
         let query = r#"
-            query ListCycles($teamId: String!) {
+            query ListCycles($teamId: ID!) {
                 cycles(filter: { team: { id: { eq: $teamId } } }, first: 25) {
                     nodes {
                         id
