@@ -43,7 +43,7 @@ impl LinearTool {
         let resp = self
             .client
             .post(LINEAR_API_URL)
-            .bearer_auth(&self.api_key)
+            .header("Authorization", &self.api_key)
             .json(&body)
             .send()
             .await
@@ -584,7 +584,7 @@ impl LinearTool {
 
     async fn list_states(&self, _args: &Value) -> anyhow::Result<ToolResult> {
         let query = r#"
-            query ListStates($teamId: String!) {
+            query ListStates($teamId: ID!) {
                 team(id: $teamId) {
                     states {
                         nodes {
@@ -645,7 +645,7 @@ impl LinearTool {
 
     async fn list_members(&self, _args: &Value) -> anyhow::Result<ToolResult> {
         let query = r#"
-            query ListMembers($teamId: String!) {
+            query ListMembers($teamId: ID!) {
                 team(id: $teamId) {
                     members {
                         nodes {
@@ -704,7 +704,7 @@ impl LinearTool {
 
     async fn list_labels(&self, _args: &Value) -> anyhow::Result<ToolResult> {
         let query = r#"
-            query ListLabels($teamId: String!) {
+            query ListLabels($teamId: ID!) {
                 team(id: $teamId) {
                     labels {
                         nodes {
@@ -1359,7 +1359,7 @@ impl LinearTool {
 
     async fn list_templates(&self, _args: &Value) -> anyhow::Result<ToolResult> {
         let query = r#"
-            query ListTemplates($teamId: String!) {
+            query ListTemplates($teamId: ID!) {
                 team(id: $teamId) {
                     templates {
                         nodes {
