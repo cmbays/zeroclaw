@@ -43,7 +43,7 @@ impl LinearTool {
         let resp = self
             .client
             .post(LINEAR_API_URL)
-            .bearer_auth(&self.api_key)
+            .header("Authorization", &self.api_key)
             .json(&body)
             .send()
             .await
