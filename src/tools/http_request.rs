@@ -616,8 +616,10 @@ mod tests {
         let tool = HttpRequestTool::new(
             Arc::new(SecurityPolicy::default()),
             vec!["example.com".into()],
+            UrlAccessConfig::default(),
             0, // max_response_size = 0 means no limit
             30,
+            "zeroclaw-test".into(),
         );
         let text = "a".repeat(10_000_000);
         assert_eq!(tool.truncate_response(&text), text);
@@ -628,8 +630,10 @@ mod tests {
         let tool = HttpRequestTool::new(
             Arc::new(SecurityPolicy::default()),
             vec!["example.com".into()],
+            UrlAccessConfig::default(),
             5,
             30,
+            "zeroclaw-test".into(),
         );
         let text = "hello world";
         let truncated = tool.truncate_response(text);

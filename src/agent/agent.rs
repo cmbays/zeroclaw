@@ -39,6 +39,7 @@ pub struct Agent {
     available_hints: Vec<String>,
     route_model_by_hint: HashMap<String, String>,
     research_config: ResearchPhaseConfig,
+    team_config: Option<crate::config::TeamConfig>,
 }
 
 pub struct AgentBuilder {
@@ -61,6 +62,7 @@ pub struct AgentBuilder {
     available_hints: Option<Vec<String>>,
     route_model_by_hint: Option<HashMap<String, String>>,
     research_config: Option<ResearchPhaseConfig>,
+    team_config: Option<crate::config::TeamConfig>,
 }
 
 impl AgentBuilder {
@@ -85,6 +87,7 @@ impl AgentBuilder {
             available_hints: None,
             route_model_by_hint: None,
             research_config: None,
+            team_config: None,
         }
     }
 
@@ -189,6 +192,11 @@ impl AgentBuilder {
         self
     }
 
+    pub fn team_config(mut self, team_config: crate::config::TeamConfig) -> Self {
+        self.team_config = Some(team_config);
+        self
+    }
+
     pub fn build(self) -> Result<Agent> {
         let tools = self
             .tools
@@ -233,6 +241,7 @@ impl AgentBuilder {
             available_hints: self.available_hints.unwrap_or_default(),
             route_model_by_hint: self.route_model_by_hint.unwrap_or_default(),
             research_config: self.research_config.unwrap_or_default(),
+            team_config: self.team_config,
         })
     }
 }
@@ -381,6 +390,7 @@ impl Agent {
             .skills_prompt_mode(config.skills.prompt_injection_mode)
             .auto_save(config.memory.auto_save)
             .research_config(config.research.clone())
+            .team_config(config.team.clone())
             .build()
     }
 
@@ -421,6 +431,7 @@ impl Agent {
             skills_prompt_mode: self.skills_prompt_mode,
             identity_config: Some(&self.identity_config),
             dispatcher_instructions: &instructions,
+            team_config: self.team_config.as_ref(),
         };
         self.prompt_builder.build(&ctx)
     }

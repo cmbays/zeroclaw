@@ -23,7 +23,7 @@ pub use schema::{
     WasmCapabilityEscalationMode, WasmConfig, WasmModuleHashPolicy, WasmRuntimeConfig,
     WasmSecurityConfig, WebFetchConfig, WebSearchConfig, WebhookConfig,
     // Fork additions
-    TeamBotEntry, TeamConfig,
+    TeamBotEntry, TeamConfig, LinearConfig,
 };
 
 pub fn name_and_presence<T: traits::ChannelConfig>(channel: Option<&T>) -> (&'static str, bool) {

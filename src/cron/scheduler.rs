@@ -366,7 +366,11 @@ pub(crate) async fn deliver_announcement(
                 mm.channel_id.clone(),
                 mm.allowed_users.clone(),
                 mm.thread_replies.unwrap_or(true),
-                mm.mention_only.unwrap_or(false),
+                mm.effective_group_reply_mode().requires_mention(),
+                mm.thread_ttl_minutes.unwrap_or(30),
+                config.identity.aieos_path.clone(),
+                mm.sync_profile.unwrap_or(true),
+                mm.admin_token.clone(),
             );
             channel.send(&SendMessage::new(output, target)).await?;
         }

@@ -454,6 +454,7 @@ mod tests {
             skills_prompt_mode: crate::config::SkillsPromptInjectionMode::Full,
             identity_config: Some(&identity_config),
             dispatcher_instructions: "",
+            team_config: None,
         };
 
         let section = IdentitySection;
@@ -501,6 +502,7 @@ mod tests {
             skills_prompt_mode: crate::config::SkillsPromptInjectionMode::Full,
             identity_config: Some(&identity_config),
             dispatcher_instructions: "",
+            team_config: None,
         };
 
         let section = IdentitySection;

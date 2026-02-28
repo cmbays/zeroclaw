@@ -197,6 +197,9 @@ pub async fn run_wizard(force: bool) -> Result<Config> {
         mcp: crate::config::schema::McpConfig::default(),
         model_support_vision: None,
         wasm: crate::config::WasmConfig::default(),
+        team: crate::config::TeamConfig::default(),
+        tool_allowlist: Vec::new(),
+        linear: crate::config::LinearConfig::default(),
     };
 
     println!(
@@ -561,6 +564,9 @@ async fn run_quick_setup_with_home(
         mcp: crate::config::schema::McpConfig::default(),
         model_support_vision: None,
         wasm: crate::config::WasmConfig::default(),
+        team: crate::config::TeamConfig::default(),
+        tool_allowlist: Vec::new(),
+        linear: crate::config::LinearConfig::default(),
     };
     if no_totp {
         config.security.otp.enabled = false;
@@ -7985,6 +7991,9 @@ mod tests {
             thread_replies: Some(true),
             mention_only: Some(false),
             group_reply: None,
+            thread_ttl_minutes: None,
+            sync_profile: None,
+            admin_token: None,
         });
         assert!(has_launchable_channels(&channels));
 

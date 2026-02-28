@@ -287,6 +287,15 @@ pub struct Config {
     /// Team bot registry for multi-bot delegation via @mentions (`[team]`).
     #[serde(default)]
     pub team: TeamConfig,
+
+    /// Tool allowlist: if non-empty, only these tool names will be available to the model.
+    /// Used for per-bot tool restriction (fork addition).
+    #[serde(default)]
+    pub tool_allowlist: Vec<String>,
+
+    /// Linear integration configuration (`[linear]` section, fork addition).
+    #[serde(default)]
+    pub linear: LinearConfig,
 }
 
 /// A single bot entry in the team registry.
@@ -309,6 +318,20 @@ pub struct TeamConfig {
     /// Ordered list of team bots
     #[serde(default)]
     pub bots: Vec<TeamBotEntry>,
+}
+
+/// Linear integration configuration (`[linear]` section, fork addition).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
+pub struct LinearConfig {
+    /// Whether the Linear tool is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Linear API key.
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// Linear team ID to scope queries.
+    #[serde(default)]
+    pub team_id: Option<String>,
 }
 
 /// Named provider profile definition compatible with Codex app-server style config.
@@ -5113,6 +5136,9 @@ impl Default for Config {
             mcp: McpConfig::default(),
             model_support_vision: None,
             wasm: WasmConfig::default(),
+            team: TeamConfig::default(),
+            tool_allowlist: Vec::new(),
+            linear: LinearConfig::default(),
         }
     }
 }
@@ -7672,6 +7698,9 @@ default_temperature = 0.7
             mcp: McpConfig::default(),
             model_support_vision: None,
             wasm: WasmConfig::default(),
+            team: TeamConfig::default(),
+            tool_allowlist: Vec::new(),
+            linear: LinearConfig::default(),
         };
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
@@ -8043,6 +8072,9 @@ tool_dispatcher = "xml"
             mcp: McpConfig::default(),
             model_support_vision: None,
             wasm: WasmConfig::default(),
+            team: TeamConfig::default(),
+            tool_allowlist: Vec::new(),
+            linear: LinearConfig::default(),
         };
 
         config.save().await.unwrap();
