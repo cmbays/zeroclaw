@@ -4,7 +4,7 @@ use anyhow::{bail, Result};
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::{Mutex, RwLock};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -87,6 +87,12 @@ pub struct MattermostChannel {
     admin_token: Option<String>,
     /// Prompt injection guard for incoming messages.
     prompt_guard: PromptGuard,
+    /// Mattermost usernames of bot team peers (from team config), resolved to user IDs at startup.
+    bot_peer_usernames: Vec<String>,
+    /// Resolved Mattermost user IDs of bot team peers.
+    /// Messages from these IDs respond once but do not activate or refresh thread continuation,
+    /// preventing runaway bot-to-bot reply loops.
+    bot_peer_user_ids: Mutex<HashSet<String>>,
 }
 
 impl MattermostChannel {
@@ -125,12 +131,23 @@ impl MattermostChannel {
             sync_profile,
             admin_token,
             prompt_guard: PromptGuard::with_config(prompt_guard_action.unwrap_or_default(), 0.7),
+            bot_peer_usernames: Vec::new(),
+            bot_peer_user_ids: Mutex::new(HashSet::new()),
         }
     }
 
     /// Configure sender IDs that bypass mention gating in channel/group chats.
     pub fn with_group_reply_allowed_senders(mut self, sender_ids: Vec<String>) -> Self {
         self.group_reply_allowed_sender_ids = normalize_group_reply_allowed_sender_ids(sender_ids);
+        self
+    }
+
+    /// Provide Mattermost usernames of bot team peers (from `[team]` config).
+    /// These are resolved to user IDs at startup via the Mattermost API and used to suppress
+    /// thread continuation for bot-originated messages — bots respond once to a delegation
+    /// but do not keep the thread warm, preventing runaway bot-to-bot reply loops.
+    pub fn with_bot_peer_usernames(mut self, usernames: Vec<String>) -> Self {
+        self.bot_peer_usernames = usernames;
         self
     }
 
@@ -428,6 +445,7 @@ impl Channel for MattermostChannel {
         if !bot_user_id.is_empty() {
             self.sync_mattermost_profile(&bot_user_id).await;
         }
+        self.resolve_bot_peer_user_ids().await;
         match self
             .listen_websocket(&tx, &bot_user_id, &bot_username)
             .await
@@ -535,6 +553,47 @@ impl Channel for MattermostChannel {
 }
 
 impl MattermostChannel {
+    /// Resolve bot peer usernames to Mattermost user IDs via a single batch API call.
+    /// Populates `self.bot_peer_user_ids` for use in loop prevention during message parsing.
+    async fn resolve_bot_peer_user_ids(&self) {
+        if self.bot_peer_usernames.is_empty() {
+            return;
+        }
+        let url = format!("{}/api/v4/users/usernames", self.base_url);
+        match self
+            .http_client()
+            .post(&url)
+            .bearer_auth(&self.bot_token)
+            .json(&self.bot_peer_usernames)
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                match resp.json::<Vec<serde_json::Value>>().await {
+                    Ok(users) => {
+                        let ids: HashSet<String> = users
+                            .iter()
+                            .filter_map(|u| {
+                                u.get("id").and_then(|id| id.as_str()).map(str::to_string)
+                            })
+                            .collect();
+                        tracing::info!(
+                            "Mattermost: resolved {} bot peer user IDs for loop prevention",
+                            ids.len()
+                        );
+                        *self.bot_peer_user_ids.lock() = ids;
+                    }
+                    Err(e) => tracing::warn!("Mattermost: failed to parse peer user IDs: {e}"),
+                }
+            }
+            Ok(resp) => tracing::warn!(
+                "Mattermost: peer user ID lookup returned {}",
+                resp.status()
+            ),
+            Err(e) => tracing::warn!("Mattermost: peer user ID lookup failed: {e}"),
+        }
+    }
+
     /// Build the WebSocket URL from base_url (https:// → wss://, http:// → ws://).
     fn websocket_url(&self) -> String {
         let (scheme, rest) = if let Some(r) = self.base_url.strip_prefix("https://") {
@@ -856,6 +915,10 @@ impl MattermostChannel {
             return None;
         }
 
+        // Bot-sender flag: messages from team peer bots respond once but must not activate
+        // or refresh thread continuation — prevents runaway bot-to-bot reply loops.
+        let is_bot_sender = self.bot_peer_user_ids.lock().contains(user_id);
+
         let require_mention = self.mention_only && !self.is_group_sender_trigger_enabled(user_id);
 
         // mention_only filtering: skip messages that don't @-mention the bot,
@@ -883,12 +946,16 @@ impl MattermostChannel {
                 let content = normalize_mattermost_content(text, bot_user_id, bot_username, post)?;
                 // Guard before touch — blocked messages must not activate thread state.
                 self.screen_with_guard(&content, user_id)?;
-                if !thread_id.is_empty() {
+                // Bot-sender messages: respond once but do not activate thread continuation.
+                // This prevents the receiving bot from treating subsequent bot replies as
+                // ongoing conversation, which would create runaway bot-to-bot reply loops.
+                if !thread_id.is_empty() && !is_bot_sender {
                     self.thread_state.touch(thread_id);
                 }
                 content
-            } else if in_active_thread {
-                // Thread continuation — refresh TTL and pass message through unmodified.
+            } else if in_active_thread && !is_bot_sender {
+                // Thread continuation — only for human senders.
+                // Bot replies in an active thread are ignored to prevent loop amplification.
                 // Guard before touch — blocked replies must not refresh thread TTL.
                 let content = text.to_string();
                 self.screen_with_guard(&content, user_id)?;

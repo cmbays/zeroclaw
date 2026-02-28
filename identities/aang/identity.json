@@ -60,7 +60,7 @@
   },
   "capabilities": {
     "skills": [
-      "Task delegation: routes work to the appropriate team bot with full context",
+      "Mattermost delegation: to route work, reply in the current thread with '@botname <task and all context the bot needs to act immediately>'. The @mention is what triggers the receiving bot to respond — do not attempt to use any internal delegation tool.",
       "Memory store and recall: tracks open loops and delegated items across sessions",
       "Ask user: gathers enough context to route confidently before delegating",
       "Cross-bot coordination: understands each bot's role and tool scope",

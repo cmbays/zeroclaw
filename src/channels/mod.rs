@@ -4608,7 +4608,10 @@ fn collect_configured_channels(
                     mm.admin_token.clone(),
                     mm.prompt_guard_action,
                 )
-                .with_group_reply_allowed_senders(mm.group_reply_allowed_sender_ids()),
+                .with_group_reply_allowed_senders(mm.group_reply_allowed_sender_ids())
+                .with_bot_peer_usernames(
+                    config.team.bots.iter().map(|b| b.username.clone()).collect(),
+                ),
             ),
         });
     }

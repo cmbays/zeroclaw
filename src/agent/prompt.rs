@@ -266,7 +266,10 @@ impl PromptSection for TeamSection {
         }
         out.push_str("\n### Delegation Rules\n\n");
         out.push_str("- When a request falls outside your tool allowlist, @mention the appropriate team member in the current thread\n");
+        out.push_str("- Delegation format: reply with `@botname <task and all context the bot needs to act>` — the @mention is what triggers the receiving bot to respond\n");
         out.push_str("- When delegating, provide enough context for the receiving bot to act without asking follow-up questions\n");
+        out.push_str("- Delegate at most once per request — if the receiving bot cannot help, inform the user rather than re-routing\n");
+        out.push_str("- When completing a delegated task from another bot, post your result without @mentioning anyone — this signals task completion and ends the chain\n");
         out.push_str("- Do not attempt tasks outside your capabilities — delegate instead");
         Ok(out)
     }
