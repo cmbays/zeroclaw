@@ -17,7 +17,7 @@ const LINEAR_API_URL: &str = "https://api.linear.app/graphql";
 /// Validate that `url` is the Linear GraphQL endpoint — HTTPS only, `api.linear.app` only,
 /// with private-IP blocking. Called before every reqwest call in [`LinearTool::graphql`].
 fn validate_linear_url(url: &str) -> anyhow::Result<()> {
-    let allowed = vec!["api.linear.app".to_string()];
+    let allowed = ["api.linear.app".to_string()];
     validate_url(
         url,
         &DomainPolicy {
