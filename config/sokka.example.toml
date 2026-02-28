@@ -8,7 +8,7 @@ default_model = "qwen3:4b"
 api_key = "http://localhost:11434"
 default_temperature = 0.3
 
-tool_allowlist = ["shell", "file_read", "file_write", "file_edit", "glob", "content_search", "ask_user"]
+tool_allowlist = ["shell", "file_read", "file_write", "file_edit", "glob", "content_search", "ask_user", "apply_patch", "process", "docx_read"]
 
 [agent]
 compact_context = false   # keep full context for code/file workflows
