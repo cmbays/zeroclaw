@@ -145,19 +145,30 @@ impl MattermostChannel {
 
     /// Get the bot's own user ID and username so we can ignore our own messages
     /// and detect @-mentions by username.
+    ///
+    /// Returns empty strings on any failure and logs a warning so the caller
+    /// can degrade gracefully rather than silently misbehave.
     async fn get_bot_identity(&self) -> (String, String) {
-        let resp: Option<serde_json::Value> = async {
-            self.http_client()
-                .get(format!("{}/api/v4/users/me", self.base_url))
-                .bearer_auth(&self.bot_token)
-                .send()
-                .await
-                .ok()?
-                .json()
-                .await
-                .ok()
-        }
-        .await;
+        let resp: Option<serde_json::Value> = match self
+            .http_client()
+            .get(format!("{}/api/v4/users/me", self.base_url))
+            .bearer_auth(&self.bot_token)
+            .send()
+            .await
+        {
+            Err(e) => {
+                tracing::warn!("Mattermost: bot identity request failed: {e}");
+                None
+            }
+            Ok(r) if !r.status().is_success() => {
+                tracing::warn!(
+                    status = %r.status(),
+                    "Mattermost: bot identity request returned error status"
+                );
+                None
+            }
+            Ok(r) => r.json().await.ok(),
+        };
 
         let id = resp
             .as_ref()
@@ -360,10 +371,12 @@ impl Channel for MattermostChannel {
         });
 
         if let Some(root) = root_id {
-            body_map.as_object_mut().unwrap().insert(
-                "root_id".to_string(),
-                serde_json::Value::String(root.to_string()),
-            );
+            if let Some(obj) = body_map.as_object_mut() {
+                obj.insert(
+                    "root_id".to_string(),
+                    serde_json::Value::String(root.to_string()),
+                );
+            }
         }
 
         let resp = self
@@ -444,21 +457,25 @@ impl Channel for MattermostChannel {
             loop {
                 let mut body = serde_json::json!({ "channel_id": channel_id });
                 if let Some(ref pid) = parent_id {
-                    body.as_object_mut()
-                        .unwrap()
-                        .insert("parent_id".to_string(), serde_json::json!(pid));
+                    if let Some(obj) = body.as_object_mut() {
+                        obj.insert("parent_id".to_string(), serde_json::json!(pid));
+                    }
                 }
 
-                if let Ok(r) = client
+                match client
                     .post(&url)
                     .bearer_auth(&token)
                     .json(&body)
                     .send()
                     .await
                 {
-                    if !r.status().is_success() {
+                    Ok(r) if !r.status().is_success() => {
                         tracing::debug!(status = %r.status(), "Mattermost typing indicator failed");
                     }
+                    Err(e) => {
+                        tracing::debug!("Mattermost typing send error: {e}");
+                    }
+                    Ok(_) => {}
                 }
 
                 // Mattermost typing events expire after ~6s; re-fire every 4s.
@@ -1958,5 +1975,183 @@ mod tests {
             "user-2".into(),
         ]);
         assert_eq!(normalized, vec!["user-1".to_string(), "user-2".to_string()]);
+    }
+
+    // ── HTTP-level tests (wiremock) ───────────────────────────────
+    //
+    // These tests spin up a local mock HTTP server and point MattermostChannel
+    // at it so we can verify send/health_check/get_bot_identity without a live
+    // Mattermost instance.
+    mod http {
+        use super::*;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        fn make_ch(base_url: String) -> MattermostChannel {
+            MattermostChannel::new(
+                base_url,
+                "test-token".into(),
+                Some("chan1".into()),
+                vec!["*".into()],
+                true,
+                false,
+            )
+        }
+
+        // ── send ─────────────────────────────────────────────────
+
+        #[tokio::test]
+        async fn send_message_success() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/api/v4/posts"))
+                .respond_with(
+                    ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": "post1"})),
+                )
+                .mount(&server)
+                .await;
+
+            let ch = make_ch(server.uri());
+            assert!(ch.send(&SendMessage::new("hello", "chan1")).await.is_ok());
+        }
+
+        #[tokio::test]
+        async fn send_message_401_returns_error() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/api/v4/posts"))
+                .respond_with(ResponseTemplate::new(401).set_body_string("Unauthorized"))
+                .mount(&server)
+                .await;
+
+            let ch = make_ch(server.uri());
+            let err = ch
+                .send(&SendMessage::new("hello", "chan1"))
+                .await
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("401"),
+                "expected 401 in error, got: {err}"
+            );
+        }
+
+        #[tokio::test]
+        async fn send_message_500_returns_error() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/api/v4/posts"))
+                .respond_with(ResponseTemplate::new(500).set_body_string("oops"))
+                .mount(&server)
+                .await;
+
+            let ch = make_ch(server.uri());
+            let err = ch
+                .send(&SendMessage::new("hello", "chan1"))
+                .await
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("500"),
+                "expected 500 in error, got: {err}"
+            );
+        }
+
+        #[tokio::test]
+        async fn send_message_thread_encodes_root_id_in_body() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/api/v4/posts"))
+                .respond_with(
+                    ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": "reply1"})),
+                )
+                .mount(&server)
+                .await;
+
+            let ch = make_ch(server.uri());
+            // Recipient "chan1:root999" encodes a threaded post target.
+            assert!(ch
+                .send(&SendMessage::new("reply", "chan1:root999"))
+                .await
+                .is_ok());
+
+            let reqs = server.received_requests().await.unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+            assert_eq!(body["channel_id"], "chan1");
+            assert_eq!(body["root_id"], "root999");
+        }
+
+        // ── health_check ─────────────────────────────────────────
+
+        #[tokio::test]
+        async fn health_check_returns_true_on_200() {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/api/v4/users/me"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({"id": "bot1", "username": "testbot"})),
+                )
+                .mount(&server)
+                .await;
+
+            let ch = make_ch(server.uri());
+            assert!(ch.health_check().await);
+        }
+
+        #[tokio::test]
+        async fn health_check_returns_false_on_401() {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/api/v4/users/me"))
+                .respond_with(ResponseTemplate::new(401))
+                .mount(&server)
+                .await;
+
+            let ch = make_ch(server.uri());
+            assert!(!ch.health_check().await);
+        }
+
+        // ── get_bot_identity ─────────────────────────────────────
+
+        #[tokio::test]
+        async fn get_bot_identity_parses_id_and_username() {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/api/v4/users/me"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "id": "bot-user-1",
+                    "username": "sokka"
+                })))
+                .mount(&server)
+                .await;
+
+            let ch = make_ch(server.uri());
+            let (id, username) = ch.get_bot_identity().await;
+            assert_eq!(id, "bot-user-1");
+            assert_eq!(username, "sokka");
+        }
+
+        /// Regression: a 401 response with a JSON error body must not leak the
+        /// error body's "id" field as the bot user ID.
+        #[tokio::test]
+        async fn get_bot_identity_returns_empty_on_error_status() {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/api/v4/users/me"))
+                .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                    "id": "api.context.session_expired.app_error",
+                    "message": "Invalid session."
+                })))
+                .mount(&server)
+                .await;
+
+            let ch = make_ch(server.uri());
+            let (id, username) = ch.get_bot_identity().await;
+            // The error body's "id" field must not be returned as the bot identity.
+            assert!(
+                id.is_empty(),
+                "error body 'id' must not leak as bot id, got: {id:?}"
+            );
+            assert!(username.is_empty());
+        }
     }
 }
