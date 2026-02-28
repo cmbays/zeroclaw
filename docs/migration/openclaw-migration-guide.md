@@ -273,10 +273,10 @@ The converter handles: provider/model parsing, gateway settings, memory defaults
 - [ ] Set API key: `export ZEROCLAW_API_KEY='...'`
 - [ ] Build: `cargo build --release`
 - [ ] Deploy (Docker or native)
-- [ ] Pair: `curl -X POST http://<HOST>:<PORT>/pair -H 'X-Pairing-Code: ...'`
-- [ ] Verify health: `curl http://<HOST>:<PORT>/health`
-- [ ] Test /api/chat: `curl -X POST http://<HOST>:<PORT>/api/chat -H 'Authorization: Bearer ...' -d '{"message":"hello"}'`
-- [ ] Test /v1/chat/completions: `curl -X POST http://<HOST>:<PORT>/v1/chat/completions -H 'Authorization: Bearer ...' -d '{"messages":[{"role":"user","content":"hello"}]}'`
+- [ ] Pair: `curl -X POST http://host:port/pair -H 'X-Pairing-Code: ...'`
+- [ ] Verify health: `curl http://host:port/health`
+- [ ] Test /api/chat: `curl -X POST http://host:port/api/chat -H 'Authorization: Bearer ...' -d '{"message":"hello"}'`
+- [ ] Test /v1/chat/completions: `curl -X POST http://host:port/v1/chat/completions -H 'Authorization: Bearer ...' -d '{"messages":[{"role":"user","content":"hello"}]}'`
 - [ ] Update callers to point to new host
 - [ ] Monitor logs for errors
 

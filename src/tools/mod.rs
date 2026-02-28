@@ -16,9 +16,10 @@
 //! [`all_tools_with_runtime`]. See `AGENTS.md` §7.3 for the full change playbook.
 
 pub mod agents_ipc;
-pub mod ask_user;
-pub mod linear;
 pub mod apply_patch;
+pub mod ask_user;
+pub mod auth_profile;
+pub mod linear;
 pub mod browser;
 pub mod browser_open;
 pub mod cli_discovery;
@@ -33,6 +34,8 @@ pub mod cron_update;
 pub mod delegate;
 pub mod delegate_coordination_status;
 pub mod docx_read;
+#[cfg(feature = "channel-lark")]
+pub mod feishu_doc;
 pub mod file_edit;
 pub mod file_read;
 pub mod file_write;
@@ -58,6 +61,7 @@ pub mod pdf_read;
 pub mod process;
 pub mod proxy_config;
 pub mod pushover;
+pub mod quota_tools;
 pub mod schedule;
 pub mod schema;
 pub mod screenshot;
@@ -71,7 +75,9 @@ pub mod traits;
 pub mod url_validation;
 pub mod wasm_module;
 pub mod wasm_tool;
+pub mod web_access_config;
 pub mod web_fetch;
+pub mod web_search_config;
 pub mod web_search_tool;
 
 pub use apply_patch::ApplyPatchTool;
@@ -88,6 +94,8 @@ pub use cron_update::CronUpdateTool;
 pub use delegate::DelegateTool;
 pub use delegate_coordination_status::DelegateCoordinationStatusTool;
 pub use docx_read::DocxReadTool;
+#[cfg(feature = "channel-lark")]
+pub use feishu_doc::FeishuDocTool;
 pub use file_edit::FileEditTool;
 pub use file_read::FileReadTool;
 pub use file_write::FileWriteTool;
@@ -125,11 +133,16 @@ pub use traits::Tool;
 #[allow(unused_imports)]
 pub use traits::{ToolResult, ToolSpec};
 pub use wasm_module::WasmModuleTool;
+pub use web_access_config::WebAccessConfigTool;
 pub use web_fetch::WebFetchTool;
-pub use web_search_tool::WebSearchTool;
+pub use web_search_config::WebSearchConfigTool;
 // Fork additions
 pub use ask_user::AskUserTool;
 pub use linear::LinearTool;
+pub use web_search_tool::WebSearchTool;
+
+pub use auth_profile::ManageAuthProfileTool;
+pub use quota_tools::{CheckProviderQuotaTool, EstimateQuotaCostTool, SwitchProviderTool};
 
 use crate::config::{Config, DelegateAgentConfig};
 use crate::memory::Memory;
@@ -285,6 +298,12 @@ pub fn all_tools_with_runtime(
             security.clone(),
         )),
         Arc::new(ProxyConfigTool::new(config.clone(), security.clone())),
+        Arc::new(WebAccessConfigTool::new(config.clone(), security.clone())),
+        Arc::new(WebSearchConfigTool::new(config.clone(), security.clone())),
+        Arc::new(ManageAuthProfileTool::new(config.clone())),
+        Arc::new(CheckProviderQuotaTool::new(config.clone())),
+        Arc::new(SwitchProviderTool::new(config.clone())),
+        Arc::new(EstimateQuotaCostTool),
         Arc::new(PushoverTool::new(
             security.clone(),
             workspace_dir.to_path_buf(),
@@ -325,17 +344,26 @@ pub fn all_tools_with_runtime(
 
     if browser_config.enabled {
         // Add legacy browser_open tool for simple URL opening
-        tool_arcs.push(Arc::new(BrowserOpenTool::new(
+        let browser_choice = browser_open::BrowserChoice::from_str(&browser_config.browser_open);
+        if browser_choice != browser_open::BrowserChoice::Disable {
+            tool_arcs.push(Arc::new(BrowserOpenTool::new(
+                security.clone(),
+                browser_config.allowed_domains.clone(),
+                root_config.security.url_access.clone(),
+                browser_choice,
+            )));
+        }
+        // Add full browser automation tool (pluggable backend)
+        tool_arcs.push(Arc::new(BrowserTool::new_with_backend_and_url_access(
             security.clone(),
             browser_config.allowed_domains.clone(),
             root_config.security.url_access.clone(),
-        )));
-        // Add full browser automation tool (pluggable backend)
-        tool_arcs.push(Arc::new(BrowserTool::new_with_backend(
-            security.clone(),
-            browser_config.allowed_domains.clone(),
             browser_config.session_name.clone(),
             browser_config.backend.clone(),
+            browser_config.auto_backend_priority.clone(),
+            browser_config.agent_browser_command.clone(),
+            browser_config.agent_browser_extra_args.clone(),
+            browser_config.agent_browser_timeout_ms,
             browser_config.native_headless,
             browser_config.native_webdriver_url.clone(),
             browser_config.native_chrome_path.clone(),
@@ -359,6 +387,7 @@ pub fn all_tools_with_runtime(
             http_config.max_response_size,
             http_config.timeout_secs,
             http_config.user_agent.clone(),
+            http_config.credential_profiles.clone(),
         )));
     }
 
@@ -379,24 +408,30 @@ pub fn all_tools_with_runtime(
 
     // Web search tool (enabled by default for GLM and other models)
     if root_config.web_search.enabled {
-        let provider = root_config.web_search.provider.trim().to_lowercase();
-        let api_key = if provider == "brave" {
-            root_config
-                .web_search
-                .brave_api_key
-                .clone()
-                .or_else(|| root_config.web_search.api_key.clone())
-        } else {
-            root_config.web_search.api_key.clone()
-        };
-        tool_arcs.push(Arc::new(WebSearchTool::new(
+        tool_arcs.push(Arc::new(WebSearchTool::new_with_options(
             security.clone(),
             root_config.web_search.provider.clone(),
-            api_key,
+            root_config.web_search.api_key.clone(),
+            root_config.web_search.brave_api_key.clone(),
+            root_config.web_search.perplexity_api_key.clone(),
+            root_config.web_search.exa_api_key.clone(),
+            root_config.web_search.jina_api_key.clone(),
             root_config.web_search.api_url.clone(),
             root_config.web_search.max_results,
             root_config.web_search.timeout_secs,
             root_config.web_search.user_agent.clone(),
+            root_config.web_search.fallback_providers.clone(),
+            root_config.web_search.retries_per_provider,
+            root_config.web_search.retry_backoff_ms,
+            root_config.web_search.domain_filter.clone(),
+            root_config.web_search.language_filter.clone(),
+            root_config.web_search.country.clone(),
+            root_config.web_search.recency_filter.clone(),
+            root_config.web_search.max_tokens,
+            root_config.web_search.max_tokens_per_page,
+            root_config.web_search.exa_search_type.clone(),
+            root_config.web_search.exa_include_text,
+            root_config.web_search.jina_site_filters.clone(),
         )));
     }
 
@@ -433,6 +468,7 @@ pub fn all_tools_with_runtime(
         let provider_runtime_options = crate::providers::ProviderRuntimeOptions {
             auth_profile_override: None,
             provider_api_url: root_config.api_url.clone(),
+            provider_transport: root_config.effective_provider_transport(),
             zeroclaw_dir: root_config
                 .config_path
                 .parent()
@@ -517,31 +553,40 @@ pub fn all_tools_with_runtime(
         )));
     }
 
-    // Inter-process agent communication (opt-in)
-    if root_config.agents_ipc.enabled {
-        match agents_ipc::IpcDb::open(workspace_dir, &root_config.agents_ipc) {
-            Ok(ipc_db) => {
-                let ipc_db = Arc::new(ipc_db);
-                tool_arcs.push(Arc::new(agents_ipc::AgentsListTool::new(ipc_db.clone())));
-                tool_arcs.push(Arc::new(agents_ipc::AgentsSendTool::new(
-                    ipc_db.clone(),
+    // Feishu document tools (enabled when channel-lark feature is active)
+    #[cfg(feature = "channel-lark")]
+    {
+        let feishu_creds = root_config
+            .channels_config
+            .feishu
+            .as_ref()
+            .map(|fs| (fs.app_id.clone(), fs.app_secret.clone(), true))
+            .or_else(|| {
+                root_config
+                    .channels_config
+                    .lark
+                    .as_ref()
+                    .map(|lk| (lk.app_id.clone(), lk.app_secret.clone(), lk.use_feishu))
+            });
+
+        if let Some((app_id, app_secret, use_feishu)) = feishu_creds {
+            let app_id = app_id.trim().to_string();
+            let app_secret = app_secret.trim().to_string();
+            if app_id.is_empty() || app_secret.is_empty() {
+                tracing::warn!(
+                    "feishu_doc: skipped registration because app credentials are empty"
+                );
+            } else {
+                tool_arcs.push(Arc::new(FeishuDocTool::new(
+                    app_id,
+                    app_secret,
+                    use_feishu,
                     security.clone(),
                 )));
-                tool_arcs.push(Arc::new(agents_ipc::AgentsInboxTool::new(ipc_db.clone())));
-                tool_arcs.push(Arc::new(agents_ipc::StateGetTool::new(ipc_db.clone())));
-                tool_arcs.push(Arc::new(agents_ipc::StateSetTool::new(
-                    ipc_db,
-                    security.clone(),
-                )));
-            }
-            Err(e) => {
-                tracing::warn!("agents_ipc: failed to open IPC database: {e}");
             }
         }
     }
 
-    // Load WASM plugin tools from the skills directory.
-    // Each installed skill package may ship one or more WASM tools under
     // Fork: always-available interactive tool
     tool_arcs.push(Arc::new(AskUserTool));
 
@@ -561,13 +606,7 @@ pub fn all_tools_with_runtime(
         }
     }
 
-    // `<skill-dir>/tools/<tool-name>/{tool.wasm, manifest.json}`.
-    // Failures are logged and skipped — a broken plugin must not block startup.
-    let skills_dir = workspace_dir.join("skills");
-    let mut boxed = boxed_registry_from_arcs(tool_arcs);
-    let wasm_tools = wasm_tool::load_wasm_tools_from_skills(&skills_dir);
-    boxed.extend(wasm_tools);
-    boxed
+        boxed_registry_from_arcs(tool_arcs)
 }
 
 #[cfg(test)]
@@ -659,6 +698,8 @@ mod tests {
         assert!(names.contains(&"model_routing_config"));
         assert!(names.contains(&"pushover"));
         assert!(names.contains(&"proxy_config"));
+        assert!(names.contains(&"web_access_config"));
+        assert!(names.contains(&"web_search_config"));
     }
 
     #[test]
@@ -701,6 +742,45 @@ mod tests {
         assert!(names.contains(&"model_routing_config"));
         assert!(names.contains(&"pushover"));
         assert!(names.contains(&"proxy_config"));
+        assert!(names.contains(&"web_access_config"));
+        assert!(names.contains(&"web_search_config"));
+    }
+
+    #[test]
+    fn all_tools_includes_docx_read_tool() {
+        let tmp = TempDir::new().unwrap();
+        let security = Arc::new(SecurityPolicy::default());
+        let mem_cfg = MemoryConfig {
+            backend: "markdown".into(),
+            ..MemoryConfig::default()
+        };
+        let mem: Arc<dyn Memory> =
+            Arc::from(crate::memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
+
+        let browser = BrowserConfig {
+            enabled: false,
+            ..BrowserConfig::default()
+        };
+        let http = crate::config::HttpRequestConfig::default();
+        let cfg = test_config(&tmp);
+
+        let tools = all_tools(
+            Arc::new(Config::default()),
+            &security,
+            mem,
+            None,
+            None,
+            &browser,
+            &http,
+            &crate::config::WebFetchConfig::default(),
+            tmp.path(),
+            &HashMap::new(),
+            None,
+            &cfg,
+        );
+        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+        assert!(names.contains(&"docx_read"));
+        assert!(names.contains(&"pdf_read"));
     }
 
     #[test]

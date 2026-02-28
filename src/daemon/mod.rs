@@ -227,26 +227,27 @@ async fn run_heartbeat_worker(config: Config) -> Result<()> {
             {
                 Ok(output) => {
                     crate::health::mark_component_ok("heartbeat");
-                    let announcement = if output.trim().is_empty() {
-                        "heartbeat task executed".to_string()
-                    } else {
-                        output
-                    };
-                    if let Some((channel, target)) = &delivery {
-                        if let Err(e) = crate::cron::scheduler::deliver_announcement(
-                            &config,
-                            channel,
-                            target,
-                            &announcement,
-                        )
-                        .await
-                        {
-                            crate::health::mark_component_error(
-                                "heartbeat",
-                                format!("delivery failed: {e}"),
-                            );
-                            tracing::warn!("Heartbeat delivery failed: {e}");
+                    if let Some(announcement) = heartbeat_announcement_text(&output) {
+                        if let Some((channel, target)) = &delivery {
+                            if let Err(e) = crate::cron::scheduler::deliver_announcement(
+                                &config,
+                                channel,
+                                target,
+                                &announcement,
+                            )
+                            .await
+                            {
+                                crate::health::mark_component_error(
+                                    "heartbeat",
+                                    format!("delivery failed: {e}"),
+                                );
+                                tracing::warn!("Heartbeat delivery failed: {e}");
+                            }
                         }
+                    } else {
+                        tracing::debug!(
+                            "Heartbeat returned sentinel (NO_REPLY/HEARTBEAT_OK); skipping delivery"
+                        );
                     }
                 }
                 Err(e) => {
@@ -256,6 +257,25 @@ async fn run_heartbeat_worker(config: Config) -> Result<()> {
             }
         }
     }
+}
+
+fn heartbeat_announcement_text(output: &str) -> Option<String> {
+    if crate::cron::scheduler::is_no_reply_sentinel(output) || is_heartbeat_ok_sentinel(output) {
+        return None;
+    }
+    if output.trim().is_empty() {
+        return Some("heartbeat task executed".to_string());
+    }
+    Some(output.to_string())
+}
+
+fn is_heartbeat_ok_sentinel(output: &str) -> bool {
+    const HEARTBEAT_OK: &str = "HEARTBEAT_OK";
+    output
+        .trim()
+        .get(..HEARTBEAT_OK.len())
+        .map(|prefix| prefix.eq_ignore_ascii_case(HEARTBEAT_OK))
+        .unwrap_or(false)
 }
 
 fn heartbeat_tasks_for_tick(
@@ -477,6 +497,7 @@ mod tests {
             draft_update_interval_ms: 1000,
             interrupt_on_new_message: false,
             mention_only: false,
+            ack_enabled: true,
             group_reply: None,
             base_url: None,
         });
@@ -505,9 +526,6 @@ mod tests {
             thread_replies: Some(true),
             mention_only: Some(false),
             group_reply: None,
-            thread_ttl_minutes: None,
-            sync_profile: None,
-            admin_token: None,
         });
         assert!(has_supervised_channels(&config));
     }
@@ -554,6 +572,37 @@ mod tests {
     fn heartbeat_tasks_ignore_empty_fallback_message() {
         let tasks = heartbeat_tasks_for_tick(vec![], Some("   "));
         assert!(tasks.is_empty());
+    }
+
+    #[test]
+    fn heartbeat_announcement_text_skips_no_reply_sentinel() {
+        assert!(heartbeat_announcement_text(" NO_reply ").is_none());
+    }
+
+    #[test]
+    fn heartbeat_announcement_text_skips_heartbeat_ok_sentinel() {
+        assert!(heartbeat_announcement_text(" heartbeat_ok ").is_none());
+    }
+
+    #[test]
+    fn heartbeat_announcement_text_skips_heartbeat_ok_prefix_case_insensitive() {
+        assert!(heartbeat_announcement_text(" heArTbEaT_oK - all clear ").is_none());
+    }
+
+    #[test]
+    fn heartbeat_announcement_text_uses_default_for_empty_output() {
+        assert_eq!(
+            heartbeat_announcement_text(" \n\t "),
+            Some("heartbeat task executed".to_string())
+        );
+    }
+
+    #[test]
+    fn heartbeat_announcement_text_keeps_regular_output() {
+        assert_eq!(
+            heartbeat_announcement_text("system nominal"),
+            Some("system nominal".to_string())
+        );
     }
 
     #[test]
@@ -617,6 +666,7 @@ mod tests {
             draft_update_interval_ms: 1000,
             interrupt_on_new_message: false,
             mention_only: false,
+            ack_enabled: true,
             group_reply: None,
             base_url: None,
         });
