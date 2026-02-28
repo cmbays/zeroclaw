@@ -200,7 +200,6 @@ pub async fn run_wizard(force: bool) -> Result<Config> {
         model_support_vision: None,
         wasm: crate::config::WasmConfig::default(),
         team: crate::config::TeamConfig::default(),
-        tool_allowlist: Vec::new(),
         linear: crate::config::LinearConfig::default(),
     };
 
@@ -568,7 +567,6 @@ async fn run_quick_setup_with_home(
         model_support_vision: None,
         wasm: crate::config::WasmConfig::default(),
         team: crate::config::TeamConfig::default(),
-        tool_allowlist: Vec::new(),
         linear: crate::config::LinearConfig::default(),
     };
     if no_totp {

@@ -292,11 +292,6 @@ pub struct Config {
     #[serde(default)]
     pub team: TeamConfig,
 
-    /// Tool allowlist: if non-empty, only these tool names will be available to the model.
-    /// Used for per-bot tool restriction (fork addition).
-    #[serde(default)]
-    pub tool_allowlist: Vec<String>,
-
     /// Linear integration configuration (`[linear]` section, fork addition).
     #[serde(default)]
     pub linear: LinearConfig,
@@ -810,6 +805,11 @@ pub struct AgentConfig {
     /// set to `0` for explicit disable.
     #[serde(default = "default_safety_heartbeat_turn_interval")]
     pub safety_heartbeat_turn_interval: usize,
+    /// Tool allowlist: if non-empty, only these tool names will be available to the model.
+    /// Defines the capability profile for this bot process. Empty = all registered tools exposed.
+    /// Fork addition — proposed for upstream `AgentConfig`; see docs/planning/DECISIONS.md.
+    #[serde(default)]
+    pub tool_allowlist: Vec<String>,
 }
 
 fn default_agent_max_tool_iterations() -> usize {
@@ -857,6 +857,7 @@ impl Default for AgentConfig {
             loop_detection_failure_streak: default_loop_detection_failure_streak(),
             safety_heartbeat_interval: default_safety_heartbeat_interval(),
             safety_heartbeat_turn_interval: default_safety_heartbeat_turn_interval(),
+            tool_allowlist: Vec::new(),
         }
     }
 }
@@ -5615,7 +5616,6 @@ impl Default for Config {
             model_support_vision: None,
             wasm: WasmConfig::default(),
             team: TeamConfig::default(),
-            tool_allowlist: Vec::new(),
             linear: LinearConfig::default(),
         }
     }
@@ -8702,7 +8702,6 @@ default_temperature = 0.7
             model_support_vision: None,
             wasm: WasmConfig::default(),
             team: TeamConfig::default(),
-            tool_allowlist: Vec::new(),
             linear: LinearConfig::default(),
         };
 
@@ -9077,7 +9076,6 @@ tool_dispatcher = "xml"
             model_support_vision: None,
             wasm: WasmConfig::default(),
             team: TeamConfig::default(),
-            tool_allowlist: Vec::new(),
             linear: LinearConfig::default(),
         };
 
