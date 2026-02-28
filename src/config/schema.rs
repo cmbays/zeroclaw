@@ -1,6 +1,6 @@
 use crate::config::traits::ChannelConfig;
 use crate::providers::{is_glm_alias, is_zai_alias};
-use crate::security::{AutonomyLevel, DomainMatcher};
+use crate::security::{AutonomyLevel, DomainMatcher, GuardAction};
 use anyhow::{Context, Result};
 use directories::UserDirs;
 use schemars::JsonSchema;
@@ -4327,6 +4327,10 @@ pub struct MattermostConfig {
     /// `manage_bots` permission. Falls back to `bot_token` if unset (will 403/404).
     #[serde(default)]
     pub admin_token: Option<String>,
+    /// Action to take when the prompt injection guard detects suspicious content.
+    /// Defaults to `warn` (log and pass through). Set to `block` to reject.
+    #[serde(default)]
+    pub prompt_guard_action: Option<GuardAction>,
 }
 
 impl ChannelConfig for MattermostConfig {

@@ -32,6 +32,9 @@ allowed_users = ["*"]
 thread_replies = true
 mention_only = true
 # thread_ttl_minutes = 30  # minutes of inactivity before thread continuation expires (default 30)
+# prompt_guard_action = "warn"  # "warn" (default) | "block"
+#   warn  — log suspicious patterns at debug level, pass message through (default)
+#   block — silently drop messages that score above the injection threshold
 
 [team]
 # All 6 bots listed in every config (including self) — intentional: simplifies identical team blocks.

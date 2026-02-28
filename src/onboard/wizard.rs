@@ -8412,6 +8412,10 @@ mod tests {
             thread_replies: Some(true),
             mention_only: Some(false),
             group_reply: None,
+            thread_ttl_minutes: None,
+            sync_profile: None,
+            admin_token: None,
+            prompt_guard_action: None,
         });
         assert!(has_launchable_channels(&channels));
 

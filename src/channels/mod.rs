@@ -4606,6 +4606,7 @@ fn collect_configured_channels(
                     config.identity.aieos_path.clone(),
                     mm.sync_profile.unwrap_or(true),
                     mm.admin_token.clone(),
+                    mm.prompt_guard_action,
                 )
                 .with_group_reply_allowed_senders(mm.group_reply_allowed_sender_ids()),
             ),
@@ -10768,6 +10769,10 @@ BTC is currently around $65,000 based on latest tool output."#;
             thread_replies: Some(true),
             mention_only: Some(false),
             group_reply: None,
+            thread_ttl_minutes: None,
+            sync_profile: None,
+            admin_token: None,
+            prompt_guard_action: None,
         });
 
         let channels = collect_configured_channels(&config, "test");

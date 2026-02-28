@@ -289,6 +289,10 @@ fn warn_if_high_frequency_agent_job(job: &CronJob) {
 }
 
 async fn deliver_if_configured(config: &Config, job: &CronJob, output: &str) -> Result<()> {
+    // Skip delivery when the agent signals no-reply via sentinel value.
+    if is_no_reply_sentinel(output) {
+        return Ok(());
+    }
     let delivery: &DeliveryConfig = &job.delivery;
     if !delivery.mode.eq_ignore_ascii_case("announce") {
         return Ok(());
@@ -376,6 +380,7 @@ pub(crate) async fn deliver_announcement(
                 config.identity.aieos_path.clone(),
                 mm.sync_profile.unwrap_or(true),
                 mm.admin_token.clone(),
+                mm.prompt_guard_action,
             );
             channel.send(&SendMessage::new(output, target)).await?;
         }
