@@ -14,6 +14,19 @@ parallel_tools = true     # concurrent file reads and shell ops
 skills_prompt_mode = "compact"
 tool_allowlist = ["shell", "file_read", "file_write", "file_edit", "glob", "content_search", "ask_user", "apply_patch", "process", "docx_read"]
 
+[autonomy]
+# Required fields (serde has no defaults for these — must be explicit):
+level = "supervised"
+workspace_only = true
+allowed_commands = ["git", "npm", "cargo", "ls", "cat", "grep", "find", "echo", "pwd", "wc", "head", "tail", "date", "docker", "curl", "python3", "bash", "sh"]
+forbidden_paths = ["/etc", "/root", "/home", "/usr", "/bin", "/sbin", "/lib", "/opt", "/boot", "/dev", "/proc", "/sys", "/var", "/tmp", "~/.ssh", "~/.gnupg", "~/.aws", "~/.config"]
+max_actions_per_hour = 20
+max_cost_per_day_cents = 500
+# Allow shell and file tools via Mattermost (non-CLI) without human confirmation per action.
+# Shell is excluded in non-CLI channels by default — override here so Sokka can act on delegated tasks.
+auto_approve = ["shell", "file_read", "file_write", "file_edit", "glob", "content_search", "memory_recall"]
+non_cli_excluded_tools = []  # empty = expose all tool_allowlist tools via Mattermost
+
 [identity]
 format = "aieos"
 aieos_path = "/zeroclaw-data/identities/sokka/identity.json"
