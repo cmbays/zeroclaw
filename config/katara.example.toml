@@ -24,10 +24,6 @@ step_timeout_secs = 120
 channel = "mattermost"
 target = "pm-updates"
 
-[autonomy]
-non_cli_natural_language_approval_mode = "direct"
-non_cli_approval_approvers = ["*"]  # tighten to team lead usernames in prod
-
 [agent]
 compact_context = false   # keep full context for multi-issue PM workflows
 skills_prompt_mode = "compact"
