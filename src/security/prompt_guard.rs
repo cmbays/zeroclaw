@@ -12,6 +12,7 @@
 
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder};
 use regex::Regex;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 
@@ -27,7 +28,7 @@ pub enum GuardResult {
 }
 
 /// Action to take when suspicious content is detected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum GuardAction {
     /// Log warning but allow the message.

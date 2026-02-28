@@ -47,7 +47,11 @@ bot_token = "REPLACE_WITH_MM_TOKEN_KATARA"
 allowed_users = ["*"]
 thread_replies = true
 mention_only = true
-# thread_ttl_minutes = 30  # minutes of inactivity before thread continuation expires (default 30)
+# thread_ttl_minutes = 30
+# prompt_guard_action = "warn"  # "warn" (default) | "block" | "sanitize"
+#   warn  — log suspicious messages but still pass them to the agent
+#   block — silently drop messages that match injection patterns
+  # minutes of inactivity before thread continuation expires (default 30)
 
 [team]
 # All 6 bots listed in every config (including self) — intentional: simplifies identical team blocks.
