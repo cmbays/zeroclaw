@@ -8,6 +8,10 @@ default_temperature = 0.5
 
 tool_allowlist = ["delegate", "memory_store", "memory_recall", "ask_user"]
 
+[agent]
+compact_context = false
+skills_prompt_mode = "compact"
+
 [identity]
 format = "aieos"
 aieos_path = "/zeroclaw-data/identities/aang/identity.json"

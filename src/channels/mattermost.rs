@@ -73,6 +73,8 @@ pub struct MattermostChannel {
     mention_only: bool,
     /// Active thread state for thread continuation (relevant when mention_only=true).
     thread_state: ThreadActivityState,
+    /// Sender IDs that bypass mention gating in channel/group contexts.
+    group_reply_allowed_sender_ids: Vec<String>,
     /// Handle for the background typing-indicator loop (aborted on stop_typing).
     typing_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Path to the AIEOS identity JSON file, used for startup profile sync.
@@ -107,11 +109,18 @@ impl MattermostChannel {
             thread_replies,
             mention_only,
             thread_state: ThreadActivityState::new(thread_ttl_minutes),
+            group_reply_allowed_sender_ids: Vec::new(),
             typing_handle: Mutex::new(None),
             aieos_path,
             sync_profile,
             admin_token,
         }
+    }
+
+    /// Configure sender IDs that bypass mention gating in channel/group chats.
+    pub fn with_group_reply_allowed_senders(mut self, sender_ids: Vec<String>) -> Self {
+        self.group_reply_allowed_sender_ids = normalize_group_reply_allowed_sender_ids(sender_ids);
+        self
     }
 
     fn http_client(&self) -> reqwest::Client {
@@ -122,6 +131,16 @@ impl MattermostChannel {
     /// Empty list means deny everyone. "*" means allow everyone.
     fn is_user_allowed(&self, user_id: &str) -> bool {
         self.allowed_users.iter().any(|u| u == "*" || u == user_id)
+    }
+
+    fn is_group_sender_trigger_enabled(&self, user_id: &str) -> bool {
+        let user_id = user_id.trim();
+        if user_id.is_empty() {
+            return false;
+        }
+        self.group_reply_allowed_sender_ids
+            .iter()
+            .any(|entry| entry == "*" || entry == user_id)
     }
 
     /// Get the bot's own user ID and username so we can ignore our own messages
@@ -361,7 +380,8 @@ impl Channel for MattermostChannel {
                 .text()
                 .await
                 .unwrap_or_else(|e| format!("<failed to read response: {e}>"));
-            bail!("Mattermost post failed ({status}): {body}");
+            let sanitized = crate::providers::sanitize_api_error(&body);
+            bail!("Mattermost post failed ({status}): {sanitized}");
         }
 
         Ok(())
@@ -744,13 +764,16 @@ impl MattermostChannel {
             return None;
         }
 
+        let require_mention = self.mention_only && !self.is_group_sender_trigger_enabled(user_id);
+
         // mention_only filtering: skip messages that don't @-mention the bot,
         // unless they arrive in a thread the bot recently activated (thread continuation).
+        // Group-sender-trigger bypass (is_group_sender_trigger_enabled) short-circuits all checks.
         //
         // Side effect: thread_state.touch() is called to activate or refresh the thread
         // TTL, but only after content is confirmed non-empty (touch fires after the ?
         // operator on normalize so bare "@bot" messages don't spuriously activate threads).
-        let content = if self.mention_only {
+        let content = if require_mention {
             // Thread is identified by its root post ID.
             // Top-level posts (root_id empty) use their own id — they become thread roots on reply.
             let thread_id = if root_id.is_empty() { id } else { root_id };
@@ -922,6 +945,17 @@ fn normalize_mattermost_content(
     }
 
     Some(cleaned)
+}
+
+fn normalize_group_reply_allowed_sender_ids(sender_ids: Vec<String>) -> Vec<String> {
+    let mut normalized = sender_ids
+        .into_iter()
+        .map(|entry| entry.trim().to_string())
+        .filter(|entry| !entry.is_empty())
+        .collect::<Vec<_>>();
+    normalized.sort();
+    normalized.dedup();
+    normalized
 }
 
 #[cfg(test)]
@@ -1259,6 +1293,24 @@ mod tests {
             .parse_mattermost_post(&post, "bot123", "mybot", 1_500_000_000_000_i64, "chan1")
             .unwrap();
         assert_eq!(msg.content, "no mention here");
+    }
+
+    #[test]
+    fn mention_only_sender_override_allows_without_mention() {
+        let ch = make_mention_only_channel()
+            .with_group_reply_allowed_senders(vec!["user1".into(), " user1 ".into()]);
+        let post = json!({
+            "id": "post1",
+            "user_id": "user1",
+            "message": "hello everyone",
+            "create_at": 1_600_000_000_000_i64,
+            "root_id": ""
+        });
+
+        let msg = ch
+            .parse_mattermost_post(&post, "bot123", "mybot", 1_500_000_000_000_i64, "chan1")
+            .unwrap();
+        assert_eq!(msg.content, "hello everyone");
     }
 
     // ── contains_bot_mention_mm unit tests ────────────────────────
@@ -1895,5 +1947,16 @@ mod tests {
         assert!(ch
             .parse_mattermost_post(&bare, "bot123", "mybot", 0, "chan1")
             .is_none());
+    }
+
+    #[test]
+    fn normalize_group_reply_allowed_sender_ids_deduplicates() {
+        let normalized = normalize_group_reply_allowed_sender_ids(vec![
+            " user-1 ".into(),
+            "user-1".into(),
+            String::new(),
+            "user-2".into(),
+        ]);
+        assert_eq!(normalized, vec!["user-1".to_string(), "user-2".to_string()]);
     }
 }

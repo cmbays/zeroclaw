@@ -8,6 +8,10 @@ default_temperature = 0.1
 
 tool_allowlist = ["content_search", "file_read", "glob", "ask_user"]
 
+[agent]
+compact_context = false
+skills_prompt_mode = "compact"
+
 [identity]
 format = "aieos"
 aieos_path = "/zeroclaw-data/identities/azula/identity.json"

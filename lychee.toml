@@ -1,0 +1,8 @@
+# Lychee link checker configuration
+# https://lychee.cli.rs/usage/config/
+
+# Exclude placeholder host:port URLs used in docs examples
+exclude = [
+    "http://host:port.*",
+    "https://host:port.*",
+]

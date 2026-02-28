@@ -3,7 +3,7 @@ name: PR Intake Checks
 on:
     pull_request_target:
         branches: [dev, main]
-        types: [opened, reopened, synchronize, edited, ready_for_review]
+        types: [opened, reopened, synchronize, ready_for_review]
 
 concurrency:
     group: pr-intake-checks-${{ github.event.pull_request.number || github.run_id }}
@@ -13,6 +13,12 @@ permissions:
     contents: read
     pull-requests: write
     issues: write
+
+env:
+    GIT_CONFIG_COUNT: "1"
+    GIT_CONFIG_KEY_0: core.hooksPath
+    GIT_CONFIG_VALUE_0: /dev/null
+
 
 jobs:
     intake:

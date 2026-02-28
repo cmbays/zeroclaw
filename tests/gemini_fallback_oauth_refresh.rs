@@ -6,6 +6,7 @@
 //! 3. Gemini OAuth tokens are expired (we manually expire them)
 //!
 //! Then:
+//!
 //! - Gemini provider's warmup() automatically refreshes the tokens
 //! - The fallback request succeeds
 //!
