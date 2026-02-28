@@ -6,11 +6,10 @@ default_model = "qwen3:4b"
 api_key = "http://localhost:11434"
 default_temperature = 0.1
 
-tool_allowlist = ["content_search", "file_read", "glob", "ask_user"]
-
 [agent]
 compact_context = false
 skills_prompt_mode = "compact"
+tool_allowlist = ["content_search", "file_read", "glob", "ask_user"]
 
 [identity]
 format = "aieos"

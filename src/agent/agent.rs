@@ -330,7 +330,7 @@ impl Agent {
         );
 
         // Apply tool_allowlist: if non-empty, restrict tools exposed to the model.
-        let tools = apply_tool_allowlist(tools, &config.tool_allowlist);
+        let tools = apply_tool_allowlist(tools, &config.agent.tool_allowlist);
 
         let provider_name = config.default_provider.as_deref().unwrap_or("openrouter");
 

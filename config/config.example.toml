@@ -17,8 +17,11 @@ default_provider    = "ollama"
 default_model       = "qwen3:14b"
 default_temperature = 0.5
 
-# Tool ceiling — empty means all registered tools are offered.
-tool_allowlist = []
+# ── Agent ───────────────────────────────────────────────────────────────────────
+# tool_allowlist: capability profile for this bot. Empty (default) = all registered tools offered.
+
+[agent]
+# tool_allowlist = ["shell", "file_read", "linear"]  # uncomment and populate to restrict tools
 
 # ── Identity ────────────────────────────────────────────────────────────────────
 # Each bot process has one identity. Point to the bot's AIEOS JSON file.
