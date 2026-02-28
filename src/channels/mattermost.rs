@@ -167,7 +167,13 @@ impl MattermostChannel {
                 );
                 None
             }
-            Ok(r) => r.json().await.ok(),
+            Ok(r) => match r.json().await {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    tracing::warn!("Mattermost: bot identity response parse failed: {e}");
+                    None
+                }
+            },
         };
 
         let id = resp
@@ -402,6 +408,12 @@ impl Channel for MattermostChannel {
 
     async fn listen(&self, tx: tokio::sync::mpsc::Sender<ChannelMessage>) -> Result<()> {
         let (bot_user_id, bot_username) = self.get_bot_identity().await;
+        if bot_user_id.is_empty() {
+            tracing::warn!(
+                "Mattermost: bot identity unresolved; \
+                 self-message filtering and @mention detection will be disabled"
+            );
+        }
         if !bot_user_id.is_empty() {
             self.sync_mattermost_profile(&bot_user_id).await;
         }
@@ -429,13 +441,26 @@ impl Channel for MattermostChannel {
     }
 
     async fn health_check(&self) -> bool {
-        self.http_client()
+        match self
+            .http_client()
             .get(format!("{}/api/v4/users/me", self.base_url))
             .bearer_auth(&self.bot_token)
             .send()
             .await
-            .map(|r| r.status().is_success())
-            .unwrap_or(false)
+        {
+            Err(e) => {
+                tracing::warn!("Mattermost health_check connection failed: {e}");
+                false
+            }
+            Ok(r) if !r.status().is_success() => {
+                tracing::warn!(
+                    status = %r.status(),
+                    "Mattermost health_check returned non-success status"
+                );
+                false
+            }
+            Ok(_) => true,
+        }
     }
 
     async fn start_typing(&self, recipient: &str) -> Result<()> {
@@ -681,7 +706,11 @@ impl MattermostChannel {
             let data: serde_json::Value = match resp.json().await {
                 Ok(d) => d,
                 Err(e) => {
-                    tracing::warn!("Mattermost parse error: {e}");
+                    tracing::warn!(
+                        channel_id = %channel_id,
+                        since = last_create_at,
+                        "Mattermost: failed to parse posts response: {e}"
+                    );
                     continue;
                 }
             };
@@ -1993,8 +2022,12 @@ mod tests {
                 "test-token".into(),
                 Some("chan1".into()),
                 vec!["*".into()],
-                true,
-                false,
+                true,  // thread_replies
+                false, // mention_only
+                30,    // thread_ttl_minutes
+                None,  // aieos_path
+                false, // sync_profile
+                None,  // admin_token
             )
         }
 
@@ -2073,8 +2106,16 @@ mod tests {
                 .await
                 .is_ok());
 
-            let reqs = server.received_requests().await.unwrap();
-            let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+            let reqs = server
+                .received_requests()
+                .await
+                .expect("wiremock must track requests");
+            assert!(
+                !reqs.is_empty(),
+                "expected at least one POST request, got none"
+            );
+            let body: serde_json::Value =
+                serde_json::from_slice(&reqs[0].body).expect("request body must be valid JSON");
             assert_eq!(body["channel_id"], "chan1");
             assert_eq!(body["root_id"], "root999");
         }
@@ -2119,7 +2160,7 @@ mod tests {
                 .and(path("/api/v4/users/me"))
                 .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "id": "bot-user-1",
-                    "username": "sokka"
+                    "username": "zeroclaw_bot"
                 })))
                 .mount(&server)
                 .await;
@@ -2127,7 +2168,7 @@ mod tests {
             let ch = make_ch(server.uri());
             let (id, username) = ch.get_bot_identity().await;
             assert_eq!(id, "bot-user-1");
-            assert_eq!(username, "sokka");
+            assert_eq!(username, "zeroclaw_bot");
         }
 
         /// Regression: a 401 response with a JSON error body must not leak the
