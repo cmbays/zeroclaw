@@ -9,7 +9,9 @@ default_temperature = 0.5
 [agent]
 compact_context = false
 skills_prompt_mode = "compact"
-tool_allowlist = ["delegate", "memory_store", "memory_recall", "ask_user"]
+tool_allowlist = ["memory_store", "memory_recall", "ask_user"]
+# "delegate" intentionally excluded: bot-to-bot coordination uses Mattermost @mentions,
+# not ZeroClaw's in-process delegate tool (which has no Mattermost identity). See issue #79.
 
 [identity]
 format = "aieos"
