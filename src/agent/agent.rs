@@ -3,7 +3,8 @@ use crate::agent::dispatcher::{
 };
 use crate::agent::memory_loader::{DefaultMemoryLoader, MemoryLoader};
 use crate::agent::prompt::{PromptContext, SystemPromptBuilder};
-use crate::config::Config;
+use crate::agent::research;
+use crate::config::{Config, ResearchPhaseConfig};
 use crate::memory::{self, Memory, MemoryCategory};
 use crate::observability::{self, Observer, ObserverEvent};
 use crate::providers::{self, ChatMessage, ChatRequest, ConversationMessage, Provider};
@@ -30,7 +31,6 @@ pub struct Agent {
     temperature: f64,
     workspace_dir: std::path::PathBuf,
     identity_config: crate::config::IdentityConfig,
-    team_config: crate::config::TeamConfig,
     skills: Vec<crate::skills::Skill>,
     skills_prompt_mode: crate::config::SkillsPromptInjectionMode,
     auto_save: bool,
@@ -38,6 +38,7 @@ pub struct Agent {
     classification_config: crate::config::QueryClassificationConfig,
     available_hints: Vec<String>,
     route_model_by_hint: HashMap<String, String>,
+    research_config: ResearchPhaseConfig,
 }
 
 pub struct AgentBuilder {
@@ -53,13 +54,13 @@ pub struct AgentBuilder {
     temperature: Option<f64>,
     workspace_dir: Option<std::path::PathBuf>,
     identity_config: Option<crate::config::IdentityConfig>,
-    team_config: Option<crate::config::TeamConfig>,
     skills: Option<Vec<crate::skills::Skill>>,
     skills_prompt_mode: Option<crate::config::SkillsPromptInjectionMode>,
     auto_save: Option<bool>,
     classification_config: Option<crate::config::QueryClassificationConfig>,
     available_hints: Option<Vec<String>>,
     route_model_by_hint: Option<HashMap<String, String>>,
+    research_config: Option<ResearchPhaseConfig>,
 }
 
 impl AgentBuilder {
@@ -77,13 +78,13 @@ impl AgentBuilder {
             temperature: None,
             workspace_dir: None,
             identity_config: None,
-            team_config: None,
             skills: None,
             skills_prompt_mode: None,
             auto_save: None,
             classification_config: None,
             available_hints: None,
             route_model_by_hint: None,
+            research_config: None,
         }
     }
 
@@ -147,11 +148,6 @@ impl AgentBuilder {
         self
     }
 
-    pub fn team_config(mut self, team_config: crate::config::TeamConfig) -> Self {
-        self.team_config = Some(team_config);
-        self
-    }
-
     pub fn skills(mut self, skills: Vec<crate::skills::Skill>) -> Self {
         self.skills = Some(skills);
         self
@@ -185,6 +181,11 @@ impl AgentBuilder {
 
     pub fn route_model_by_hint(mut self, route_model_by_hint: HashMap<String, String>) -> Self {
         self.route_model_by_hint = Some(route_model_by_hint);
+        self
+    }
+
+    pub fn research_config(mut self, research_config: ResearchPhaseConfig) -> Self {
+        self.research_config = Some(research_config);
         self
     }
 
@@ -224,7 +225,6 @@ impl AgentBuilder {
                 .workspace_dir
                 .unwrap_or_else(|| std::path::PathBuf::from(".")),
             identity_config: self.identity_config.unwrap_or_default(),
-            team_config: self.team_config.unwrap_or_default(),
             skills: self.skills.unwrap_or_default(),
             skills_prompt_mode: self.skills_prompt_mode.unwrap_or_default(),
             auto_save: self.auto_save.unwrap_or(false),
@@ -232,15 +232,11 @@ impl AgentBuilder {
             classification_config: self.classification_config.unwrap_or_default(),
             available_hints: self.available_hints.unwrap_or_default(),
             route_model_by_hint: self.route_model_by_hint.unwrap_or_default(),
+            research_config: self.research_config.unwrap_or_default(),
         })
     }
 }
 
-/// Filter a tool registry to only the named tools in `allowlist`.
-///
-/// When `allowlist` is empty every tool is kept unchanged, preserving the
-/// default "all tools available" behaviour. Unknown names in the allowlist are
-/// silently ignored (the tool simply won't be registered).
 fn apply_tool_allowlist(tools: Vec<Box<dyn Tool>>, allowlist: &[String]) -> Vec<Box<dyn Tool>> {
     if allowlist.is_empty() {
         return tools;
@@ -269,16 +265,14 @@ impl Agent {
         &self.history
     }
 
-    /// Returns the number of tools registered on this agent.
-    ///
-    /// Useful in tests to assert that `tool_allowlist` filtering (or any
-    /// pre-builder filtering) produced the expected tool set.
-    pub fn tool_count(&self) -> usize {
-        self.tools.len()
-    }
-
     pub fn clear_history(&mut self) {
         self.history.clear();
+    }
+
+    /// Return the number of tools currently registered with this agent.
+    /// Useful for asserting that post-builder filtering produced the expected tool set.
+    pub fn tool_count(&self) -> usize {
+        self.tools.len()
     }
 
     pub fn from_config(config: &Config) -> Result<Self> {
@@ -380,13 +374,13 @@ impl Agent {
             .available_hints(available_hints)
             .route_model_by_hint(route_model_by_hint)
             .identity_config(config.identity.clone())
-            .team_config(config.team.clone())
             .skills(crate::skills::load_skills_with_config(
                 &config.workspace_dir,
                 config,
             ))
             .skills_prompt_mode(config.skills.prompt_injection_mode)
             .auto_save(config.memory.auto_save)
+            .research_config(config.research.clone())
             .build()
     }
 
@@ -427,7 +421,6 @@ impl Agent {
             skills_prompt_mode: self.skills_prompt_mode,
             identity_config: Some(&self.identity_config),
             dispatcher_instructions: &instructions,
-            team_config: Some(&self.team_config),
         };
         self.prompt_builder.build(&ctx)
     }
@@ -532,11 +525,60 @@ impl Agent {
             .await
             .unwrap_or_default();
 
-        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
-        let enriched = if context.is_empty() {
-            format!("[{now}] {user_message}")
+        // ── Research Phase ──────────────────────────────────────────────
+        // If enabled and triggered, run a focused research turn to gather
+        // information before the main response.
+        let research_context = if research::should_trigger(&self.research_config, user_message) {
+            if self.research_config.show_progress {
+                println!("[Research] Gathering information...");
+            }
+
+            match research::run_research_phase(
+                &self.research_config,
+                self.provider.as_ref(),
+                &self.tools,
+                user_message,
+                &self.model_name,
+                self.temperature,
+                self.observer.clone(),
+            )
+            .await
+            {
+                Ok(result) => {
+                    if self.research_config.show_progress {
+                        println!(
+                            "[Research] Complete: {} tool calls, {} chars context",
+                            result.tool_call_count,
+                            result.context.len()
+                        );
+                        for summary in &result.tool_summaries {
+                            println!("  - {}: {}", summary.tool_name, summary.result_preview);
+                        }
+                    }
+                    if result.context.is_empty() {
+                        None
+                    } else {
+                        Some(result.context)
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Research phase failed: {}", e);
+                    None
+                }
+            }
         } else {
-            format!("{context}[{now}] {user_message}")
+            None
+        };
+
+        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
+        let stamped_user_message = format!("[{now}] {user_message}");
+        let enriched = match (&context, &research_context) {
+            (c, Some(r)) if !c.is_empty() => {
+                format!("{c}\n\n{r}\n\n{stamped_user_message}")
+            }
+            (_, Some(r)) => format!("{r}\n\n{stamped_user_message}"),
+            (c, None) if !c.is_empty() => format!("{c}{stamped_user_message}"),
+            _ => stamped_user_message,
         };
 
         self.history

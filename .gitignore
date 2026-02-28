@@ -8,6 +8,11 @@ firmware/*/target
 __pycache__/
 *.pyc
 docker-compose.override.yml
+site/node_modules/
+site/.vite/
+site/public/docs-content/
+gh-pages/
+.idea
 
 # Environment and secret files — never commit actuals, only *.example variants
 .env
@@ -41,3 +46,6 @@ config/config.mattermost.toml
 config/*.toml
 !config/*.example.toml
 .worktrees/
+
+# Nix
+result
