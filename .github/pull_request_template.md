@@ -2,7 +2,7 @@
 
 Describe this PR in 2-5 bullets:
 
-- Base branch target (`main` or `dev`; direct `main` PRs are allowed):
+- Base branch target (`dev`; all PRs target `dev` — `main` is upstream mirror only):
 - Problem:
 - Why it matters:
 - What changed:
@@ -28,8 +28,7 @@ Describe this PR in 2-5 bullets:
 - Related #
 - Depends on # (if stacked)
 - Supersedes # (if replacing older PR)
-- Linear issue key(s) (required, e.g. `RMN-123`):
-- Linear issue URL(s):
+- Linear issue key(s) (N/A — upstream zeroclaw tracker; omit for fork PRs):
 
 ## Supersede Attribution (required when `Supersedes #` is used)
 
