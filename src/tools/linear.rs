@@ -6,11 +6,33 @@
 //! that adds authentication and validates the HTTP response.
 
 use super::traits::{Tool, ToolResult};
+use super::url_validation::{validate_url, DomainPolicy, UrlSchemePolicy};
+use crate::config::UrlAccessConfig;
 use anyhow::Context;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
 const LINEAR_API_URL: &str = "https://api.linear.app/graphql";
+
+/// Validate that `url` is the Linear GraphQL endpoint — HTTPS only, `api.linear.app` only,
+/// with private-IP blocking. Called before every reqwest call in [`LinearTool::graphql`].
+fn validate_linear_url(url: &str) -> anyhow::Result<()> {
+    let allowed = ["api.linear.app".to_string()];
+    validate_url(
+        url,
+        &DomainPolicy {
+            allowed_domains: &allowed,
+            blocked_domains: &[],
+            allowed_field_name: "linear.endpoint",
+            blocked_field_name: None,
+            empty_allowed_message: "Linear endpoint allowlist must not be empty",
+            scheme_policy: UrlSchemePolicy::HttpsOnly,
+            ipv6_error_context: "linear",
+            url_access: Some(&UrlAccessConfig::default()),
+        },
+    )?;
+    Ok(())
+}
 
 /// Linear API tool — exposes full PM capabilities to the agent.
 pub struct LinearTool {
@@ -38,6 +60,8 @@ impl LinearTool {
 
     /// Execute a GraphQL query/mutation against the Linear API.
     async fn graphql(&self, query: &str, variables: Value) -> anyhow::Result<Value> {
+        validate_linear_url(LINEAR_API_URL)?;
+
         let body = json!({ "query": query, "variables": variables });
 
         let resp = self
@@ -2277,5 +2301,37 @@ mod tests {
             })
             .collect();
         assert_eq!(filtered.len(), 2);
+    }
+
+    // ── SSRF protection ───────────────────────────────────────────────────────
+
+    #[test]
+    fn linear_tool_rejects_non_linear_url() {
+        // The hardcoded endpoint must pass.
+        assert!(validate_linear_url(LINEAR_API_URL).is_ok());
+        // Any other host must be rejected.
+        let err = validate_linear_url("https://evil.com/graphql")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("linear.endpoint"),
+            "expected allowlist error, got: {err}"
+        );
+        // Private IPs must be rejected even if somehow in the URL.
+        let err = validate_linear_url("https://192.168.1.1/graphql")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("linear.endpoint"),
+            "expected allowlist error, got: {err}"
+        );
+        // HTTP (non-HTTPS) must be rejected even for the correct host.
+        let err = validate_linear_url("http://api.linear.app/graphql")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("https://"),
+            "expected scheme error, got: {err}"
+        );
     }
 }
