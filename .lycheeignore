@@ -1,2 +1,3 @@
-# Placeholder URLs used in docs — not real endpoints
-http://host:port
+# Placeholder URLs used in docs — not real endpoint addresses
+http://host:port*
+https://host:port*
