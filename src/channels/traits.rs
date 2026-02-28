@@ -347,6 +347,7 @@ mod tests {
         assert_eq!(msg.thread_ts.as_deref(), Some("ts123"));
     }
 
+
     #[tokio::test]
     async fn approval_prompt_truncates_safely_for_multibyte_utf8() {
         let channel = DummyChannel;

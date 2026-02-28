@@ -1,7 +1,7 @@
 use super::{IntegrationCategory, IntegrationEntry, IntegrationStatus};
 use crate::providers::{
-    is_glm_alias, is_minimax_alias, is_moonshot_alias, is_qianfan_alias, is_qwen_alias,
-    is_zai_alias,
+    is_doubao_alias, is_glm_alias, is_minimax_alias, is_moonshot_alias, is_qianfan_alias,
+    is_qwen_alias, is_siliconflow_alias, is_zai_alias,
 };
 
 /// Returns the full catalog of integrations
@@ -437,6 +437,33 @@ pub fn all_integrations() -> Vec<IntegrationEntry> {
             },
         },
         IntegrationEntry {
+            name: "Volcengine ARK",
+            description: "Doubao and ARK model catalog",
+            category: IntegrationCategory::AiModel,
+            status_fn: |c| {
+                if c.default_provider.as_deref().is_some_and(is_doubao_alias) {
+                    IntegrationStatus::Active
+                } else {
+                    IntegrationStatus::Available
+                }
+            },
+        },
+        IntegrationEntry {
+            name: "SiliconFlow",
+            description: "OpenAI-compatible hosted models and reasoning",
+            category: IntegrationCategory::AiModel,
+            status_fn: |c| {
+                if c.default_provider
+                    .as_deref()
+                    .is_some_and(is_siliconflow_alias)
+                {
+                    IntegrationStatus::Active
+                } else {
+                    IntegrationStatus::Available
+                }
+            },
+        },
+        IntegrationEntry {
             name: "Groq",
             description: "Llama 3.3 70B Versatile and low-latency models",
             category: IntegrationCategory::AiModel,
@@ -466,18 +493,6 @@ pub fn all_integrations() -> Vec<IntegrationEntry> {
             category: IntegrationCategory::AiModel,
             status_fn: |c| {
                 if c.default_provider.as_deref() == Some("fireworks") {
-                    IntegrationStatus::Active
-                } else {
-                    IntegrationStatus::Available
-                }
-            },
-        },
-        IntegrationEntry {
-            name: "Novita AI",
-            description: "Affordable open-source inference",
-            category: IntegrationCategory::AiModel,
-            status_fn: |c| {
-                if c.default_provider.as_deref() == Some("novita") {
                     IntegrationStatus::Active
                 } else {
                     IntegrationStatus::Available
@@ -804,6 +819,7 @@ mod tests {
             draft_update_interval_ms: 1000,
             interrupt_on_new_message: false,
             mention_only: false,
+            ack_enabled: true,
             group_reply: None,
             base_url: None,
         });
@@ -1001,6 +1017,32 @@ mod tests {
         let qianfan = entries.iter().find(|e| e.name == "Qianfan").unwrap();
         assert!(matches!(
             (qianfan.status_fn)(&config),
+            IntegrationStatus::Active
+        ));
+
+        config.default_provider = Some("ark".to_string());
+        let volcengine = entries.iter().find(|e| e.name == "Volcengine ARK").unwrap();
+        assert!(matches!(
+            (volcengine.status_fn)(&config),
+            IntegrationStatus::Active
+        ));
+
+        config.default_provider = Some("volcengine".to_string());
+        assert!(matches!(
+            (volcengine.status_fn)(&config),
+            IntegrationStatus::Active
+        ));
+
+        config.default_provider = Some("siliconflow".to_string());
+        let siliconflow = entries.iter().find(|e| e.name == "SiliconFlow").unwrap();
+        assert!(matches!(
+            (siliconflow.status_fn)(&config),
+            IntegrationStatus::Active
+        ));
+
+        config.default_provider = Some("silicon-cloud".to_string());
+        assert!(matches!(
+            (siliconflow.status_fn)(&config),
             IntegrationStatus::Active
         ));
     }

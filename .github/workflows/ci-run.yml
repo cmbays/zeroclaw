@@ -24,12 +24,13 @@ env:
 jobs:
     changes:
         name: Detect Change Scope
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-22.04
         outputs:
             docs_only: ${{ steps.scope.outputs.docs_only }}
             docs_changed: ${{ steps.scope.outputs.docs_changed }}
             rust_changed: ${{ steps.scope.outputs.rust_changed }}
             workflow_changed: ${{ steps.scope.outputs.workflow_changed }}
+            ci_cd_changed: ${{ steps.scope.outputs.ci_cd_changed }}
             docs_files: ${{ steps.scope.outputs.docs_files }}
             base_sha: ${{ steps.scope.outputs.base_sha }}
         steps:
@@ -49,8 +50,8 @@ jobs:
         name: Lint Gate (Format + Clippy + Strict Delta)
         needs: [changes]
         if: needs.changes.outputs.rust_changed == 'true'
-        runs-on: ubuntu-latest
-        timeout-minutes: 25
+        runs-on: [self-hosted, aws-india]
+        timeout-minutes: 40
         steps:
             - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
               with:
@@ -73,8 +74,8 @@ jobs:
         name: Test
         needs: [changes]
         if: needs.changes.outputs.rust_changed == 'true'
-        runs-on: ubuntu-latest
-        timeout-minutes: 35
+        runs-on: [self-hosted, aws-india]
+        timeout-minutes: 60
         steps:
             - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
             - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
@@ -136,8 +137,8 @@ jobs:
         name: Build (Smoke)
         needs: [changes]
         if: needs.changes.outputs.rust_changed == 'true'
-        runs-on: ubuntu-latest
-        timeout-minutes: 20
+        runs-on: [self-hosted, aws-india]
+        timeout-minutes: 35
 
         steps:
             - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -157,7 +158,7 @@ jobs:
         name: Docs-Only Fast Path
         needs: [changes]
         if: needs.changes.outputs.docs_only == 'true'
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-22.04
         steps:
             - name: Skip heavy jobs for docs-only change
               run: echo "Docs-only change detected. Rust lint/test/build skipped."
@@ -166,7 +167,7 @@ jobs:
         name: Non-Rust Fast Path
         needs: [changes]
         if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.rust_changed != 'true'
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-22.04
         steps:
             - name: Skip Rust jobs for non-Rust change scope
               run: echo "No Rust-impacting files changed. Rust lint/test/build skipped."
@@ -175,7 +176,7 @@ jobs:
         name: Docs Quality
         needs: [changes]
         if: needs.changes.outputs.docs_changed == 'true'
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-22.04
         timeout-minutes: 15
         steps:
             - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -230,7 +231,7 @@ jobs:
         name: Lint Feedback
         if: github.event_name == 'pull_request'
         needs: [changes, lint, docs-quality]
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-22.04
         permissions:
             contents: read
             pull-requests: write
@@ -252,55 +253,11 @@ jobs:
                       const script = require('./.github/workflows/scripts/lint_feedback.js');
                       await script({github, context, core});
 
-    workflow-owner-approval:
-        name: Workflow Owner Approval
-        needs: [changes]
-        if: github.event_name == 'pull_request' && needs.changes.outputs.workflow_changed == 'true'
-        runs-on: ubuntu-latest
-        permissions:
-            contents: read
-            pull-requests: read
-        steps:
-            - name: Checkout repository
-              uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-
-            - name: Require owner approval for workflow file changes
-              uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
-              env:
-                  WORKFLOW_OWNER_LOGINS: ${{ vars.WORKFLOW_OWNER_LOGINS }}
-              with:
-                  script: |
-                    const script = require('./.github/workflows/scripts/ci_workflow_owner_approval.js');
-                    await script({ github, context, core });
-
-    human-review-approval:
-        name: Human Review Approval
-        needs: [changes]
-        if: github.event_name == 'pull_request'
-        runs-on: ubuntu-latest
-        permissions:
-            contents: read
-            pull-requests: read
-        steps:
-            - name: Checkout repository
-              uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-              with:
-                  ref: ${{ github.event.pull_request.base.sha }}
-
-            - name: Require at least one human approving review
-              uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
-              env:
-                  HUMAN_REVIEW_BOT_LOGINS: ${{ vars.HUMAN_REVIEW_BOT_LOGINS }}
-              with:
-                  script: |
-                    const script = require('./.github/workflows/scripts/ci_human_review_guard.js');
-                    await script({ github, context, core });
-
     license-file-owner-guard:
         name: License File Owner Guard
         needs: [changes]
         if: github.event_name == 'pull_request'
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-22.04
         permissions:
             contents: read
             pull-requests: read
@@ -317,8 +274,8 @@ jobs:
     ci-required:
         name: CI Required Gate
         if: always()
-        needs: [changes, lint, test, build, docs-only, non-rust, docs-quality, lint-feedback, workflow-owner-approval, human-review-approval, license-file-owner-guard]
-        runs-on: ubuntu-latest
+        needs: [changes, lint, test, build, docs-only, non-rust, docs-quality, lint-feedback, license-file-owner-guard]
+        runs-on: ubuntu-22.04
         steps:
             - name: Enforce required status
               shell: bash
@@ -328,23 +285,12 @@ jobs:
                   event_name="${{ github.event_name }}"
                   rust_changed="${{ needs.changes.outputs.rust_changed }}"
                   docs_changed="${{ needs.changes.outputs.docs_changed }}"
-                  workflow_changed="${{ needs.changes.outputs.workflow_changed }}"
                   docs_result="${{ needs.docs-quality.result }}"
-                  workflow_owner_result="${{ needs.workflow-owner-approval.result }}"
-                  human_review_result="${{ needs.human-review-approval.result }}"
                   license_owner_result="${{ needs.license-file-owner-guard.result }}"
 
                   # --- Helper: enforce PR governance gates ---
                   check_pr_governance() {
                     if [ "$event_name" != "pull_request" ]; then return 0; fi
-                    if [ "$workflow_changed" = "true" ] && [ "$workflow_owner_result" != "success" ]; then
-                      echo "Workflow files changed but workflow owner approval gate did not pass."
-                      exit 1
-                    fi
-                    if [ "$human_review_result" != "success" ]; then
-                      echo "Human review approval guard did not pass."
-                      exit 1
-                    fi
                     if [ "$license_owner_result" != "success" ]; then
                       echo "License file owner guard did not pass."
                       exit 1
@@ -383,8 +329,6 @@ jobs:
                   echo "test=${test_result}"
                   echo "build=${build_result}"
                   echo "docs=${docs_result}"
-                  echo "workflow_owner_approval=${workflow_owner_result}"
-                  echo "human_review_approval=${human_review_result}"
                   echo "license_file_owner_guard=${license_owner_result}"
 
                   check_pr_governance

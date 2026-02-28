@@ -28,11 +28,13 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 mod context;
+pub(crate) mod detection;
 mod execution;
 mod history;
 mod parsing;
 
 use context::{build_context, build_hardware_context};
+use detection::{DetectionVerdict, LoopDetectionConfig, LoopDetector};
 use execution::{
     execute_tools_parallel, execute_tools_sequential, should_execute_tools_in_parallel,
     ToolExecutionOutcome,
@@ -184,6 +186,22 @@ static DEFERRED_ACTION_WITHOUT_TOOL_CALL_REGEX: LazyLock<Regex> = LazyLock::new(
     .unwrap()
 });
 
+/// Detect common CJK deferred-action phrases (e.g., Chinese "让我…查看")
+/// that imply a follow-up tool call should occur.
+static CJK_DEFERRED_ACTION_CUE_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(让我|我来|我会|我们来|我们会|我先|先让我|马上)").unwrap());
+
+/// Action verbs commonly used when promising to perform tool-backed work in CJK text.
+static CJK_DEFERRED_ACTION_VERB_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(查看|检查|搜索|查找|浏览|打开|读取|写入|运行|执行|调用|分析|验证|列出|获取|尝试|试试|继续|处理|修复|看看|看一看|看一下)").unwrap()
+});
+
+/// Fast check for CJK scripts (Han/Hiragana/Katakana/Hangul) so we only run
+/// additional regexes when non-Latin text is present.
+static CJK_SCRIPT_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]").unwrap()
+});
+
 /// Scrub credentials from tool output to prevent accidental exfiltration.
 /// Replaces known credential patterns with a redacted placeholder while preserving
 /// a small prefix for context.
@@ -270,6 +288,21 @@ pub(crate) struct NonCliApprovalContext {
 
 tokio::task_local! {
     static TOOL_LOOP_NON_CLI_APPROVAL_CONTEXT: Option<NonCliApprovalContext>;
+    static LOOP_DETECTION_CONFIG: LoopDetectionConfig;
+    static SAFETY_HEARTBEAT_CONFIG: Option<SafetyHeartbeatConfig>;
+}
+
+/// Configuration for periodic safety-constraint re-injection (heartbeat).
+#[derive(Clone)]
+pub(crate) struct SafetyHeartbeatConfig {
+    /// Pre-rendered security policy summary text.
+    pub body: String,
+    /// Inject a heartbeat every `interval` tool iterations (0 = disabled).
+    pub interval: usize,
+}
+
+fn should_inject_safety_heartbeat(counter: usize, interval: usize) -> bool {
+    interval > 0 && counter > 0 && counter % interval == 0
 }
 
 /// Extract a short hint from tool call arguments for progress display.
@@ -290,7 +323,17 @@ fn truncate_tool_args_for_progress(name: &str, args: &serde_json::Value, max_len
 
 fn looks_like_deferred_action_without_tool_call(text: &str) -> bool {
     let trimmed = text.trim();
-    !trimmed.is_empty() && DEFERRED_ACTION_WITHOUT_TOOL_CALL_REGEX.is_match(trimmed)
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    if DEFERRED_ACTION_WITHOUT_TOOL_CALL_REGEX.is_match(trimmed) {
+        return true;
+    }
+
+    CJK_SCRIPT_REGEX.is_match(trimmed)
+        && CJK_DEFERRED_ACTION_CUE_REGEX.is_match(trimmed)
+        && CJK_DEFERRED_ACTION_VERB_REGEX.is_match(trimmed)
 }
 
 fn maybe_inject_cron_add_delivery(
@@ -545,6 +588,14 @@ pub(crate) fn is_tool_iteration_limit_error(err: &anyhow::Error) -> bool {
     })
 }
 
+pub(crate) fn is_loop_detection_error(err: &anyhow::Error) -> bool {
+    err.chain().any(|source| {
+        source
+            .to_string()
+            .contains("Agent stopped early due to detected loop pattern")
+    })
+}
+
 /// Execute a single turn of the agent loop: send messages, parse tool calls,
 /// execute tools, and loop until the LLM produces a final text response.
 /// When `silent` is true, suppresses stdout (for channel use).
@@ -649,33 +700,37 @@ pub(crate) async fn run_tool_call_loop_with_non_cli_approval_context(
     on_delta: Option<tokio::sync::mpsc::Sender<String>>,
     hooks: Option<&crate::hooks::HookRunner>,
     excluded_tools: &[String],
+    safety_heartbeat: Option<SafetyHeartbeatConfig>,
 ) -> Result<String> {
     let reply_target = non_cli_approval_context
         .as_ref()
         .map(|ctx| ctx.reply_target.clone());
 
-    TOOL_LOOP_NON_CLI_APPROVAL_CONTEXT
+    SAFETY_HEARTBEAT_CONFIG
         .scope(
-            non_cli_approval_context,
-            TOOL_LOOP_REPLY_TARGET.scope(
-                reply_target,
-                run_tool_call_loop(
-                    provider,
-                    history,
-                    tools_registry,
-                    observer,
-                    provider_name,
-                    model,
-                    temperature,
-                    silent,
-                    approval,
-                    channel_name,
-                    multimodal_config,
-                    max_tool_iterations,
-                    cancellation_token,
-                    on_delta,
-                    hooks,
-                    excluded_tools,
+            safety_heartbeat,
+            TOOL_LOOP_NON_CLI_APPROVAL_CONTEXT.scope(
+                non_cli_approval_context,
+                TOOL_LOOP_REPLY_TARGET.scope(
+                    reply_target,
+                    run_tool_call_loop(
+                        provider,
+                        history,
+                        tools_registry,
+                        observer,
+                        provider_name,
+                        model,
+                        temperature,
+                        silent,
+                        approval,
+                        channel_name,
+                        multimodal_config,
+                        max_tool_iterations,
+                        cancellation_token,
+                        on_delta,
+                        hooks,
+                        excluded_tools,
+                    ),
                 ),
             ),
         )
@@ -745,6 +800,15 @@ pub(crate) async fn run_tool_call_loop(
     let mut seen_tool_signatures: HashSet<(String, String)> = HashSet::new();
     let mut missing_tool_call_retry_used = false;
     let mut missing_tool_call_retry_prompt: Option<String> = None;
+    let ld_config = LOOP_DETECTION_CONFIG
+        .try_with(Clone::clone)
+        .unwrap_or_default();
+    let mut loop_detector = LoopDetector::new(ld_config);
+    let mut loop_detection_prompt: Option<String> = None;
+    let heartbeat_config = SAFETY_HEARTBEAT_CONFIG
+        .try_with(Clone::clone)
+        .ok()
+        .flatten();
     let bypass_non_cli_approval_for_turn =
         approval.is_some_and(|mgr| channel_name != "cli" && mgr.consume_non_cli_allow_all_once());
     if bypass_non_cli_approval_for_turn {
@@ -787,6 +851,22 @@ pub(crate) async fn run_tool_call_loop(
         let mut request_messages = prepared_messages.messages.clone();
         if let Some(prompt) = missing_tool_call_retry_prompt.take() {
             request_messages.push(ChatMessage::user(prompt));
+        }
+        if let Some(prompt) = loop_detection_prompt.take() {
+            request_messages.push(ChatMessage::user(prompt));
+        }
+
+        // ── Safety heartbeat: periodic security-constraint re-injection ──
+        if let Some(ref hb) = heartbeat_config {
+            if should_inject_safety_heartbeat(iteration, hb.interval) {
+                let reminder = format!(
+                    "[Safety Heartbeat — round {}/{}]\n{}",
+                    iteration + 1,
+                    max_iterations,
+                    hb.body
+                );
+                request_messages.push(ChatMessage::user(reminder));
+            }
         }
 
         // ── Progress: LLM thinking ────────────────────────────
@@ -1198,13 +1278,30 @@ pub(crate) async fn run_tool_call_loop(
 
             // ── Approval hook ────────────────────────────────
             if let Some(mgr) = approval {
-                if bypass_non_cli_approval_for_turn {
+                let non_cli_session_granted =
+                    channel_name != "cli" && mgr.is_non_cli_session_granted(&tool_name);
+                if bypass_non_cli_approval_for_turn || non_cli_session_granted {
                     mgr.record_decision(
                         &tool_name,
                         &tool_args,
                         ApprovalResponse::Yes,
                         channel_name,
                     );
+                    if non_cli_session_granted {
+                        runtime_trace::record_event(
+                            "approval_bypass_non_cli_session_grant",
+                            Some(channel_name),
+                            Some(provider_name),
+                            Some(model),
+                            Some(&turn_id),
+                            Some(true),
+                            Some("using runtime non-cli session approval grant"),
+                            serde_json::json!({
+                                "iteration": iteration + 1,
+                                "tool": tool_name.clone(),
+                            }),
+                        );
+                    }
                 } else if mgr.needs_approval(&tool_name) {
                     let request = ApprovalRequest {
                         tool_name: tool_name.clone(),
@@ -1415,6 +1512,12 @@ pub(crate) async fn run_tool_call_loop(
                     .await;
             }
 
+            // ── Loop detection: record call ──────────────────────
+            {
+                let sig = tool_call_signature(&call.name, &call.arguments);
+                loop_detector.record_call(&sig.0, &sig.1, &outcome.output, outcome.success);
+            }
+
             ordered_results[*idx] = Some((call.name.clone(), call.tool_call_id.clone(), outcome));
         }
 
@@ -1458,6 +1561,49 @@ pub(crate) async fn run_tool_call_loop(
                     "content": result,
                 });
                 history.push(ChatMessage::tool(tool_msg.to_string()));
+            }
+        }
+
+        // ── Loop detection: check verdict ────────────────────────
+        match loop_detector.check() {
+            DetectionVerdict::Continue => {}
+            DetectionVerdict::InjectWarning(warning) => {
+                runtime_trace::record_event(
+                    "loop_detected_warning",
+                    Some(channel_name),
+                    Some(provider_name),
+                    Some(model),
+                    Some(&turn_id),
+                    Some(false),
+                    Some("loop pattern detected, injecting self-correction prompt"),
+                    serde_json::json!({ "iteration": iteration + 1, "warning": &warning }),
+                );
+                if let Some(ref tx) = on_delta {
+                    let _ = tx
+                        .send(format!(
+                            "{DRAFT_PROGRESS_SENTINEL}\u{26a0}\u{fe0f} Loop detected, attempting self-correction\n"
+                        ))
+                        .await;
+                }
+                loop_detection_prompt = Some(warning);
+            }
+            DetectionVerdict::HardStop(reason) => {
+                runtime_trace::record_event(
+                    "loop_detected_hard_stop",
+                    Some(channel_name),
+                    Some(provider_name),
+                    Some(model),
+                    Some(&turn_id),
+                    Some(false),
+                    Some("loop persisted after warning, stopping early"),
+                    serde_json::json!({ "iteration": iteration + 1, "reason": &reason }),
+                );
+                anyhow::bail!(
+                    "Agent stopped early due to detected loop pattern (iteration {}/{}): {}",
+                    iteration + 1,
+                    max_iterations,
+                    reason
+                );
             }
         }
     }
@@ -1678,6 +1824,7 @@ pub async fn run(
     let provider_runtime_options = providers::ProviderRuntimeOptions {
         auth_profile_override: None,
         provider_api_url: config.api_url.clone(),
+        provider_transport: config.effective_provider_transport(),
         zeroclaw_dir: config.config_path.parent().map(std::path::PathBuf::from),
         secrets_encrypt: config.secrets.encrypt,
         reasoning_enabled: config.runtime.reasoning_enabled,
@@ -1800,6 +1947,14 @@ pub async fn run(
         "model_routing_config",
         "Configure default model, scenario routing, and delegate agents. Use for natural-language requests like: 'set conversation to kimi and coding to gpt-5.3-codex'.",
     ));
+    tool_descs.push((
+        "web_search_config",
+        "Configure web search providers/keys/fallbacks at runtime.",
+    ));
+    tool_descs.push((
+        "web_access_config",
+        "Configure shared URL access policy (first-visit approval, allowlist/blocklist, approved domains).",
+    ));
     if !config.agents.is_empty() {
         tool_descs.push((
             "delegate",
@@ -1902,25 +2057,45 @@ pub async fn run(
             ChatMessage::user(&enriched),
         ];
 
-        let response = run_tool_call_loop(
-            provider.as_ref(),
-            &mut history,
-            &tools_registry,
-            observer.as_ref(),
-            provider_name,
-            model_name,
-            temperature,
-            false,
-            approval_manager.as_ref(),
-            channel_name,
-            &config.multimodal,
-            config.agent.max_tool_iterations,
-            None,
-            None,
-            None,
-            &[],
-        )
-        .await?;
+        let ld_cfg = LoopDetectionConfig {
+            no_progress_threshold: config.agent.loop_detection_no_progress_threshold,
+            ping_pong_cycles: config.agent.loop_detection_ping_pong_cycles,
+            failure_streak_threshold: config.agent.loop_detection_failure_streak,
+        };
+        let hb_cfg = if config.agent.safety_heartbeat_interval > 0 {
+            Some(SafetyHeartbeatConfig {
+                body: security.summary_for_heartbeat(),
+                interval: config.agent.safety_heartbeat_interval,
+            })
+        } else {
+            None
+        };
+        let response = SAFETY_HEARTBEAT_CONFIG
+            .scope(
+                hb_cfg,
+                LOOP_DETECTION_CONFIG.scope(
+                    ld_cfg,
+                    run_tool_call_loop(
+                        provider.as_ref(),
+                        &mut history,
+                        &tools_registry,
+                        observer.as_ref(),
+                        provider_name,
+                        model_name,
+                        temperature,
+                        false,
+                        approval_manager.as_ref(),
+                        channel_name,
+                        &config.multimodal,
+                        config.agent.max_tool_iterations,
+                        None,
+                        None,
+                        None,
+                        &[],
+                    ),
+                ),
+            )
+            .await?;
         final_output = response.clone();
         println!("{response}");
         observer.record_event(&ObserverEvent::TurnComplete);
@@ -1931,6 +2106,7 @@ pub async fn run(
 
         // Persistent conversation history across turns
         let mut history = vec![ChatMessage::system(&system_prompt)];
+        let mut interactive_turn: usize = 0;
         // Reusable readline editor for UTF-8 input support
         let mut rl = Editor::with_config(
             RlConfig::builder()
@@ -1981,6 +2157,7 @@ pub async fn run(
                     rl.clear_history()?;
                     history.clear();
                     history.push(ChatMessage::system(&system_prompt));
+                    interactive_turn = 0;
                     // Clear conversation and daily memory
                     let mut cleared = 0;
                     for category in [MemoryCategory::Conversation, MemoryCategory::Daily] {
@@ -2026,26 +2203,60 @@ pub async fn run(
             };
 
             history.push(ChatMessage::user(&enriched));
+            interactive_turn += 1;
 
-            let response = match run_tool_call_loop(
-                provider.as_ref(),
-                &mut history,
-                &tools_registry,
-                observer.as_ref(),
-                provider_name,
-                model_name,
-                temperature,
-                false,
-                approval_manager.as_ref(),
-                channel_name,
-                &config.multimodal,
-                config.agent.max_tool_iterations,
-                None,
-                None,
-                None,
-                &[],
-            )
-            .await
+            // Inject interactive safety heartbeat at configured turn intervals
+            if should_inject_safety_heartbeat(
+                interactive_turn,
+                config.agent.safety_heartbeat_turn_interval,
+            ) {
+                let reminder = format!(
+                    "[Safety Heartbeat — turn {}]\n{}",
+                    interactive_turn,
+                    security.summary_for_heartbeat()
+                );
+                history.push(ChatMessage::user(reminder));
+            }
+
+            let ld_cfg = LoopDetectionConfig {
+                no_progress_threshold: config.agent.loop_detection_no_progress_threshold,
+                ping_pong_cycles: config.agent.loop_detection_ping_pong_cycles,
+                failure_streak_threshold: config.agent.loop_detection_failure_streak,
+            };
+            let hb_cfg = if config.agent.safety_heartbeat_interval > 0 {
+                Some(SafetyHeartbeatConfig {
+                    body: security.summary_for_heartbeat(),
+                    interval: config.agent.safety_heartbeat_interval,
+                })
+            } else {
+                None
+            };
+            let response = match SAFETY_HEARTBEAT_CONFIG
+                .scope(
+                    hb_cfg,
+                    LOOP_DETECTION_CONFIG.scope(
+                        ld_cfg,
+                        run_tool_call_loop(
+                            provider.as_ref(),
+                            &mut history,
+                            &tools_registry,
+                            observer.as_ref(),
+                            provider_name,
+                            model_name,
+                            temperature,
+                            false,
+                            approval_manager.as_ref(),
+                            channel_name,
+                            &config.multimodal,
+                            config.agent.max_tool_iterations,
+                            None,
+                            None,
+                            None,
+                            &[],
+                        ),
+                    ),
+                )
+                .await
             {
                 Ok(resp) => resp,
                 Err(e) => {
@@ -2057,6 +2268,15 @@ pub async fn run(
                         );
                         history.push(ChatMessage::assistant(&pause_notice));
                         eprintln!("\n{pause_notice}\n");
+                        continue;
+                    }
+                    if is_loop_detection_error(&e) {
+                        let notice =
+                            "\u{26a0}\u{fe0f} Loop pattern detected and agent stopped early. \
+                            Context preserved. Reply \"continue\" to resume, or adjust \
+                            loop_detection_* thresholds in config.";
+                        history.push(ChatMessage::assistant(notice));
+                        eprintln!("\n{notice}\n");
                         continue;
                     }
                     eprintln!("\nError: {e}\n");
@@ -2158,6 +2378,7 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
     let provider_runtime_options = providers::ProviderRuntimeOptions {
         auth_profile_override: None,
         provider_api_url: config.api_url.clone(),
+        provider_transport: config.effective_provider_transport(),
         zeroclaw_dir: config.config_path.parent().map(std::path::PathBuf::from),
         secrets_encrypt: config.secrets.encrypt,
         reasoning_enabled: config.runtime.reasoning_enabled,
@@ -2202,6 +2423,14 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
         (
             "model_routing_config",
             "Configure default model, scenario routing, and delegate agents.",
+        ),
+        (
+            "web_search_config",
+            "Configure web search providers/keys/fallbacks.",
+        ),
+        (
+            "web_access_config",
+            "Configure shared URL access policy for network tools.",
         ),
         ("screenshot", "Capture a screenshot."),
         ("image_info", "Read image metadata."),
@@ -2280,19 +2509,31 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
         ChatMessage::user(&enriched),
     ];
 
-    agent_turn(
-        provider.as_ref(),
-        &mut history,
-        &tools_registry,
-        observer.as_ref(),
-        provider_name,
-        &model_name,
-        config.default_temperature,
-        true,
-        &config.multimodal,
-        config.agent.max_tool_iterations,
-    )
-    .await
+    let hb_cfg = if config.agent.safety_heartbeat_interval > 0 {
+        Some(SafetyHeartbeatConfig {
+            body: security.summary_for_heartbeat(),
+            interval: config.agent.safety_heartbeat_interval,
+        })
+    } else {
+        None
+    };
+    SAFETY_HEARTBEAT_CONFIG
+        .scope(
+            hb_cfg,
+            agent_turn(
+                provider.as_ref(),
+                &mut history,
+                &tools_registry,
+                observer.as_ref(),
+                provider_name,
+                &model_name,
+                config.default_temperature,
+                true,
+                &config.multimodal,
+                config.agent.max_tool_iterations,
+            ),
+        )
+        .await
 }
 
 #[cfg(test)]
@@ -2387,6 +2628,36 @@ mod tests {
         assert_eq!(feishu_args["delivery"]["to"], "oc_yyy");
     }
 
+    #[test]
+    fn safety_heartbeat_interval_zero_disables_injection() {
+        for counter in [0, 1, 2, 10, 100] {
+            assert!(
+                !should_inject_safety_heartbeat(counter, 0),
+                "counter={counter} should not inject when interval=0"
+            );
+        }
+    }
+
+    #[test]
+    fn safety_heartbeat_interval_one_injects_every_non_initial_step() {
+        assert!(!should_inject_safety_heartbeat(0, 1));
+        for counter in 1..=6 {
+            assert!(
+                should_inject_safety_heartbeat(counter, 1),
+                "counter={counter} should inject when interval=1"
+            );
+        }
+    }
+
+    #[test]
+    fn safety_heartbeat_injects_only_on_exact_multiples() {
+        let interval = 3;
+        let injected: Vec<usize> = (0..=10)
+            .filter(|counter| should_inject_safety_heartbeat(*counter, interval))
+            .collect();
+        assert_eq!(injected, vec![3, 6, 9]);
+    }
+
     use crate::memory::{Memory, MemoryCategory, SqliteMemory};
     use crate::observability::NoopObserver;
     use crate::providers::traits::ProviderCapabilities;
@@ -2456,6 +2727,7 @@ mod tests {
                 tool_calls: Vec::new(),
                 usage: None,
                 reasoning_content: None,
+                quota_metadata: None,
             })
         }
     }
@@ -2474,6 +2746,7 @@ mod tests {
                     tool_calls: Vec::new(),
                     usage: None,
                     reasoning_content: None,
+                    quota_metadata: None,
                 })
                 .collect();
             Self {
@@ -2997,6 +3270,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_tool_call_loop_uses_non_cli_session_grant_without_waiting_for_prompt() {
+        let provider = ScriptedProvider::from_text_responses(vec![
+            r#"<tool_call>
+{"name":"shell","arguments":{"command":"echo hi"}}
+</tool_call>"#,
+            "done",
+        ]);
+
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let tools_registry: Vec<Box<dyn Tool>> = vec![Box::new(DelayTool::new(
+            "shell",
+            50,
+            Arc::clone(&active),
+            Arc::clone(&max_active),
+        ))];
+
+        let approval_mgr = ApprovalManager::from_config(&crate::config::AutonomyConfig::default());
+        approval_mgr.grant_non_cli_session("shell");
+
+        let mut history = vec![
+            ChatMessage::system("test-system"),
+            ChatMessage::user("run shell"),
+        ];
+        let observer = NoopObserver;
+
+        let result = run_tool_call_loop(
+            &provider,
+            &mut history,
+            &tools_registry,
+            &observer,
+            "mock-provider",
+            "mock-model",
+            0.0,
+            true,
+            Some(&approval_mgr),
+            "telegram",
+            &crate::config::MultimodalConfig::default(),
+            4,
+            None,
+            None,
+            None,
+            &[],
+        )
+        .await
+        .expect("tool loop should consume non-cli session grants");
+
+        assert_eq!(result, "done");
+        assert_eq!(
+            max_active.load(Ordering::SeqCst),
+            1,
+            "shell tool should execute when runtime non-cli session grant exists"
+        );
+    }
+
+    #[tokio::test]
     async fn run_tool_call_loop_waits_for_non_cli_approval_resolution() {
         let provider = ScriptedProvider::from_text_responses(vec![
             r#"<tool_call>
@@ -3065,6 +3394,7 @@ mod tests {
             None,
             None,
             &[],
+            None,
         )
         .await
         .expect("tool loop should continue after non-cli approval");
@@ -4276,12 +4606,21 @@ Done."#;
         assert!(looks_like_deferred_action_without_tool_call(
             "It seems absolute paths are blocked. Let me try using a relative path."
         ));
+        assert!(looks_like_deferred_action_without_tool_call(
+            "看起来绝对路径不可用，让我尝试使用当前目录的相对路径。"
+        ));
+        assert!(looks_like_deferred_action_without_tool_call(
+            "页面已打开，让我获取快照查看详细信息。"
+        ));
     }
 
     #[test]
     fn looks_like_deferred_action_without_tool_call_ignores_final_answers() {
         assert!(!looks_like_deferred_action_without_tool_call(
             "The latest update is already shown above."
+        ));
+        assert!(!looks_like_deferred_action_without_tool_call(
+            "最新结果已经在上面整理完成。"
         ));
     }
 
