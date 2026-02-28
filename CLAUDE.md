@@ -3,9 +3,10 @@
 ## Fork Context
 
 This is a personal fork of [ZeroClaw](https://github.com/zeroclaw-labs/zeroclaw) building a
-conversational PM bot in Slack that drives Linear work management, powered by Ollama (Qwen 3 14B).
+multi-agent team platform on **Mattermost** (self-hosted) with ATLA-themed bots driving Linear
+work management, powered by Ollama (Qwen 3 4b → upgrading to 14b when RAM expands to 64-128 GB).
 
-**Fork surface**: ~1,100 LOC new code on 394k LOC platform (0.3%). 3 modified files + 1 new directory.
+**Fork surface**: ~1,900 LOC new code on 394k LOC platform (0.5%). 7 modified files + 2 new directories.
 
 ### Commands
 
@@ -33,23 +34,26 @@ git checkout dev && git merge main
 
 | File | Purpose | ~LOC |
 |------|---------|------|
-| `src/channels/mattermost.rs` | MattermostChannel (WebSocket + polling) | ~1700 |
-| `src/tools/linear.rs` | LinearTool (Tool trait impl, GraphQL) | 400 |
-| `src/wake_sleep.rs` | WakeSleepEngine, timers | 150 |
-| `src/tools/slack_ops.rs` | Channel lifecycle operations | 80 |
-| `src/webhook.rs` | HTTP webhook endpoint | 70 |
-| `identities/{bot}/identity.json` | ATLA bot persona (AIEOS v1.1 format) | — |
+| `src/channels/mattermost.rs` | MattermostChannel (WebSocket, ThreadActivityState, profile sync) | ~1400 |
+| `src/tools/linear.rs` | LinearTool (Tool trait impl, GraphQL — issues, create, update) | 400 |
+| `identities/{bot}/identity.json` | ATLA bot persona x6 (AIEOS v1.1 format) | — |
+| `config/{bot}.example.toml` | Per-bot config templates (tool_allowlist, team, agent tuning) | — |
+
+> `src/wake_sleep.rs`, `src/tools/slack_ops.rs`, `src/webhook.rs` removed in PR #43 (dead code cleanup).
 
 ### Modified ZeroClaw Files
 
 | File | Change | Risk |
 |------|--------|------|
-| `Cargo.toml` | Feature flags (additive) | Low |
-| `src/channels/slack.rs` | Socket Mode rewrite, BK handlers | Medium |
-| `src/channels/traits.rs` | Add fields to SendMessage | Low |
-| `src/config/schema.rs` | Add `[channels_config.mattermost]` section | Low |
-| `src/tools/mod.rs` | Register LinearTool | Low |
-| `src/main.rs` | Startup wiring | Low |
+| `Cargo.toml` | Dependencies (additive) | Low |
+| `src/channels/traits.rs` | Add `username`, `icon_emoji`, `reply_broadcast`, `blocks` to SendMessage | Low |
+| `src/config/schema.rs` | MattermostConfig fields, LinearConfig, TeamConfig/TeamBotEntry, tool_allowlist | Low |
+| `src/config/mod.rs` | Export fork config types | Low |
+| `src/agent/agent.rs` | apply_tool_allowlist(), team_config field on Agent/AgentBuilder | Low |
+| `src/agent/prompt.rs` | TeamSection (team registry in system prompt) | Low |
+| `src/tools/mod.rs` | Register LinearTool + AskUserTool | Low |
+| `src/cron/scheduler.rs` | Update MattermostChannel::new call signature | Low |
+| `src/main.rs` | Commands::Setup arm | Low |
 
 ### Fork Rules
 
