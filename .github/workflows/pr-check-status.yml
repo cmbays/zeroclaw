@@ -18,7 +18,7 @@ env:
 
 jobs:
   nudge-stale-prs:
-    runs-on: [self-hosted, aws-india]
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: write
